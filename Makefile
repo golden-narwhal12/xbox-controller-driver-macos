@@ -1,41 +1,69 @@
-# Makefile for Xbox One Controller Driver
+# Makefile for Xbox Controller Driver
+# Requires: libusb, CoreGraphics (macOS framework)
 
 CC = gcc
 CFLAGS = -Wall -Wextra -O2
-LIBS = $(shell pkg-config --cflags --libs libusb-1.0) -framework IOKit -framework CoreFoundation
+LIBUSB_FLAGS = $(shell pkg-config --cflags --libs libusb-1.0)
+FRAMEWORK_FLAGS = -framework CoreGraphics -framework ApplicationServices
 
 # Targets
-all: xbox_usb_test xbox_gip_test xbox_driver
+all: xbox_usb_test xbox_gip_test simulator
 
+# Phase 2: Basic USB test
 xbox_usb_test: phase2_usb_test.c
-	$(CC) $(CFLAGS) -o xbox_usb_test phase2_usb_test.c $(LIBS)
-	@echo "\n✅ Built xbox_usb_test"
-	@echo "Run with: sudo ./xbox_usb_test"
+	$(CC) $(CFLAGS) $< $(LIBUSB_FLAGS) -o $@
 
+# Phase 3: GIP protocol test (read-only)
 xbox_gip_test: phase3_gip_test.c gip.h
-	$(CC) $(CFLAGS) -o xbox_gip_test phase3_gip_test.c $(LIBS)
-	@echo "\n✅ Built xbox_gip_test"
-	@echo "Run with: sudo ./xbox_gip_test"
+	$(CC) $(CFLAGS) $< $(LIBUSB_FLAGS) -o $@
 
-xbox_driver: xbox_driver.c gip.h hid_descriptor.h virtual_hid.h
-	$(CC) $(CFLAGS) -o xbox_driver xbox_driver.c $(LIBS)
-	@echo "\n✅ Built complete driver"
-	@echo "Run with: sudo ./xbox_driver"
+# Simulator: Full keyboard/mouse emulator with customizable bindings
+simulator: simulator.c gip.h keymapping.h
+	$(CC) $(CFLAGS) $< $(LIBUSB_FLAGS) $(FRAMEWORK_FLAGS) -o $@ -lm
+	@echo ""
+	@echo "✅ Built simulator successfully!"
+	@echo "   Run with: sudo ./simulator"
+	@echo ""
+	@echo "⚠️  IMPORTANT: Grant Accessibility permissions:"
+	@echo "   System Settings → Privacy & Security → Accessibility"
+	@echo "   Add your terminal app to the allowed list"
+	@echo ""
+	@echo "To customize key bindings, edit keymapping.h and rebuild"
 
+# Clean
 clean:
-	rm -f xbox_usb_test xbox_gip_test xbox_driver
+	rm -f xbox_usb_test xbox_gip_test simulator
+	@echo "🧹 Cleaned up build artifacts"
 
-install: xbox_driver
-	sudo cp xbox_driver /usr/local/bin/
-	sudo chmod +x /usr/local/bin/xbox_driver
-	sudo cp com.xbox.controller.plist /Library/LaunchDaemons/
-	sudo launchctl load /Library/LaunchDaemons/com.xbox.controller.plist
-	@echo "\n✅ Driver installed and running!"
+# Install dependencies (homebrew)
+deps:
+	@echo "Installing dependencies..."
+	brew install libusb pkg-config
+	@echo "✅ Dependencies installed"
 
-uninstall:
-	sudo launchctl unload /Library/LaunchDaemons/com.xbox.controller.plist
-	sudo rm /Library/LaunchDaemons/com.xbox.controller.plist
-	sudo rm /usr/local/bin/xbox_driver
-	@echo "\n✅ Driver uninstalled"
+# Help
+help:
+	@echo "Xbox Controller Driver - Build System"
+	@echo "======================================"
+	@echo ""
+	@echo "Build Targets:"
+	@echo "  make all            - Build all programs"
+	@echo "  make simulator      - Build the keyboard/mouse simulator (recommended)"
+	@echo "  make xbox_gip_test  - Build GIP test (console output only)"
+	@echo "  make xbox_usb_test  - Build USB test (diagnostics)"
+	@echo ""
+	@echo "Usage:"
+	@echo "  sudo ./simulator       - Run the full simulator"
+	@echo "  sudo ./xbox_gip_test   - Test controller input (no keyboard/mouse)"
+	@echo ""
+	@echo "Configuration:"
+	@echo "  Edit keymapping.h to customize button bindings"
+	@echo "  Rebuild with 'make simulator' after changes"
+	@echo ""
+	@echo "Other Targets:"
+	@echo "  make clean - Remove all built files"
+	@echo "  make deps  - Install dependencies (libusb, pkg-config)"
+	@echo ""
+	@echo "Note: Requires accessibility permissions for keyboard/mouse input"
 
-.PHONY: all clean install uninstall
+.PHONY: all clean deps help
