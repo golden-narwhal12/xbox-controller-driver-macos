@@ -22,8 +22,6 @@ All mappings are customizable in `keymapping.h`.
 - Homebrew, libusb, pkg-config
 - Xcode command line tools
 
-* Note: other controller models and versions of macOS may cause issues.
-
 ## Installation
 
 ```bash
