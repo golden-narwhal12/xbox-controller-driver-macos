@@ -1,0 +1,30 @@
+# Compiled binaries
+xbox_usb_test
+xbox_gip_test
+phase3_debug
+test_iohid
+*.o
+*.dylib
+*.so
+*.a
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# Build directories
+build/
+dist/
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
