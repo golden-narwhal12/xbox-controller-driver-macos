@@ -37,6 +37,18 @@ typedef struct {
     int16_t prev_right_stick_x;
     int16_t prev_right_stick_y;
     
+    // Current stick positions (for continuous movement)
+    int16_t current_left_stick_x;
+    int16_t current_left_stick_y;
+    int16_t current_right_stick_x;
+    int16_t current_right_stick_y;
+    
+    // Smoothed stick positions (for mouse mode)
+    float smoothed_right_x;
+    float smoothed_right_y;
+    float smoothed_left_x;
+    float smoothed_left_y;
+    
     // Mouse delta accumulation
     float mouse_dx;
     float mouse_dy;
@@ -238,7 +250,7 @@ void process_stick_as_keys(int16_t x, int16_t y, uint16_t key_up, uint16_t key_d
     }
 }
 
-void process_stick_as_mouse(int16_t x, int16_t y) {
+void process_stick_as_mouse(int16_t x, int16_t y, float *smoothed_x, float *smoothed_y) {
     // Axes are swapped in the controller - swap them back
     // Physical up/down is reported in X, physical left/right is reported in Y
     int16_t temp = x;
@@ -246,8 +258,20 @@ void process_stick_as_mouse(int16_t x, int16_t y) {
     y = temp;
     
     // Normalize to -1.0 to 1.0
-    float norm_x = x / 32767.0f;
-    float norm_y = -y / 32767.0f;  // Invert Y - pushing up should move cursor up
+    float target_x = x / 32767.0f;
+    float target_y = -y / 32767.0f;  // Invert Y - pushing up should move cursor up
+    
+    // Exponential smoothing (higher smoothing = smoother but more lag)
+    // alpha determines how much of the new value vs old value to use
+    // smoothing = 0.0 means no smoothing (all new value)
+    // smoothing = 0.9 means heavy smoothing (mostly old value)
+    float alpha = 1.0f - config.sticks.mouse_smoothing;
+    *smoothed_x = alpha * target_x + (1.0f - alpha) * (*smoothed_x);
+    *smoothed_y = alpha * target_y + (1.0f - alpha) * (*smoothed_y);
+    
+    // Use smoothed values for movement
+    float norm_x = *smoothed_x;
+    float norm_y = *smoothed_y;
     
     // Apply exponential curve for better control
     float sign_x = (norm_x >= 0) ? 1.0f : -1.0f;
@@ -281,7 +305,9 @@ void process_sticks(int16_t left_x, int16_t left_y, int16_t right_x, int16_t rig
             process_stick_as_keys(left_x, left_y, 0x7E, 0x7D, 0x7B, 0x7C);
             break;
         case STICK_MODE_MOUSE:
-            process_stick_as_mouse(left_x, left_y);
+            process_stick_as_mouse(left_x, left_y, 
+                                  &input_state.smoothed_left_x, 
+                                  &input_state.smoothed_left_y);
             break;
         case STICK_MODE_DISABLED:
         default:
@@ -299,7 +325,9 @@ void process_sticks(int16_t left_x, int16_t left_y, int16_t right_x, int16_t rig
             process_stick_as_keys(right_x, right_y, 0x7E, 0x7D, 0x7B, 0x7C);
             break;
         case STICK_MODE_MOUSE:
-            process_stick_as_mouse(right_x, right_y);
+            process_stick_as_mouse(right_x, right_y, 
+                                  &input_state.smoothed_right_x, 
+                                  &input_state.smoothed_right_y);
             break;
         case STICK_MODE_DISABLED:
         default:
@@ -313,10 +341,50 @@ void process_sticks(int16_t left_x, int16_t left_y, int16_t right_x, int16_t rig
         input_state.mouse_dy = 0.0f;
     }
     
+    // Store current positions for continuous movement generation
+    input_state.current_left_stick_x = left_x;
+    input_state.current_left_stick_y = left_y;
+    input_state.current_right_stick_x = right_x;
+    input_state.current_right_stick_y = right_y;
+    
     input_state.prev_left_stick_x = left_x;
     input_state.prev_left_stick_y = left_y;
     input_state.prev_right_stick_x = right_x;
     input_state.prev_right_stick_y = right_y;
+}
+
+// Generate continuous mouse movement from currently held stick positions
+// This is called every frame, even when no new USB packet arrives
+void generate_continuous_movement() {
+    // Use the last known stick positions to generate movement
+    int16_t left_x = input_state.current_left_stick_x;
+    int16_t left_y = input_state.current_left_stick_y;
+    int16_t right_x = input_state.current_right_stick_x;
+    int16_t right_y = input_state.current_right_stick_y;
+    
+    // Apply deadzones
+    apply_deadzone(&left_x, &left_y, config.sticks.deadzone);
+    apply_deadzone(&right_x, &right_y, config.sticks.deadzone);
+    
+    // Generate mouse movement if sticks are in mouse mode
+    if (config.sticks.left_stick_mode == STICK_MODE_MOUSE) {
+        process_stick_as_mouse(left_x, left_y, 
+                              &input_state.smoothed_left_x, 
+                              &input_state.smoothed_left_y);
+    }
+    
+    if (config.sticks.right_stick_mode == STICK_MODE_MOUSE) {
+        process_stick_as_mouse(right_x, right_y, 
+                              &input_state.smoothed_right_x, 
+                              &input_state.smoothed_right_y);
+    }
+    
+    // Send accumulated mouse movement
+    if (input_state.mouse_dx != 0.0f || input_state.mouse_dy != 0.0f) {
+        send_mouse_movement(input_state.mouse_dx, input_state.mouse_dy);
+        input_state.mouse_dx = 0.0f;
+        input_state.mouse_dy = 0.0f;
+    }
 }
 
 // ============================================================================
@@ -420,7 +488,7 @@ void input_loop(libusb_device_handle *handle, uint8_t in_endpoint) {
                 GipInputPacket *input = (GipInputPacket *)buffer;
                 input_count++;
                 
-                // Process and inject input events
+                // Process and inject input events (updates stick positions)
                 process_buttons(input->buttons);
                 process_triggers(input->left_trigger, input->right_trigger);
                 process_sticks(input->left_stick_x, input->left_stick_y,
@@ -450,11 +518,13 @@ void input_loop(libusb_device_handle *handle, uint8_t in_endpoint) {
                 printf("\n🎮 GUIDE BUTTON PRESSED\n");
             }
             
-        } else if (result != LIBUSB_ERROR_TIMEOUT) {
-            if (result == LIBUSB_ERROR_NO_DEVICE) {
-                printf("\n❌ Controller disconnected!\n");
-                break;
-            }
+        } else if (result == LIBUSB_ERROR_TIMEOUT) {
+            // Timeout: No new packet, but generate movement from held stick positions
+            generate_continuous_movement();
+            
+        } else if (result == LIBUSB_ERROR_NO_DEVICE) {
+            printf("\n❌ Controller disconnected!\n");
+            break;
         }
     }
     
@@ -496,6 +566,9 @@ int main() {
            config.triggers.right_trigger_mode == TRIGGER_MODE_KEY ? "Key" : "Disabled");
     printf("  Deadzone: %d (%.1f%%)\n", config.sticks.deadzone,
            (config.sticks.deadzone / 32767.0f) * 100.0f);
+    printf("  Mouse smoothing: %.2f (0.0=none, 0.9=max)\n", config.sticks.mouse_smoothing);
+    printf("  Mouse sensitivity: %.1f\n", config.sticks.mouse_sensitivity);
+    printf("  Streaming mode: %s\n", config.streaming_mode ? "ENABLED (for Moonlight/Parsec)" : "disabled (for local apps)");
     printf("\n");
     
     printf("⚠️  IMPORTANT: You may need to grant Accessibility permissions:\n");

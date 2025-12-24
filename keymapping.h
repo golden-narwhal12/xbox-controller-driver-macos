@@ -67,6 +67,7 @@ typedef struct {
     // Mouse sensitivity (only for MOUSE mode)
     float mouse_sensitivity;     // Default: 1.5
     float mouse_curve;           // Default: 1.8 (exponential curve, 1.0=linear)
+    float mouse_smoothing;       // Default: 0.3 (0.0=no smoothing, 0.9=max smoothing)
     
     // Deadzone (0-32767, default: 8000 = ~24%)
     int16_t deadzone;
@@ -133,6 +134,7 @@ static inline ControllerMapping get_default_mapping(void) {
             
             .mouse_sensitivity = 1.5,
             .mouse_curve = 1.8,
+            .mouse_smoothing = 0.3,
             .deadzone = 8000
         },
         
