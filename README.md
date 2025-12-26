@@ -49,7 +49,7 @@ Edit `keymapping.h` to change button mappings, stick behavior, mouse sensitivity
 
 ## For game streaming 
 
-If you want to use this driver while game streaming, please change variable "streaming_mode" on line 149 of the keymapping.h file to "true" and rebuild the program. (run make clean and make simulator). 
+If you want to use this driver while game streaming, please change variable "streaming_mode" in the keymapping.h file to "true" and rebuild the program.
 
 ## How it works
 
