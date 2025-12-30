@@ -2,6 +2,8 @@
 
 A userspace driver for Xbox One controllers that translates controller input to keyboard and mouse events. Built from scratch using reverse-engineered GIP protocol. This driver can be used for game streaming (read below).
 
+Currently working on a GUI-based version: https://github.com/golden-narwhal12/xbox-controller-macos-gui
+
 ## What it does
 
 Reads input from Xbox One controllers via USB and converts it to keyboard/mouse input that works system-wide. You can use your Xbox controller in any app that accepts keyboard/mouse.
