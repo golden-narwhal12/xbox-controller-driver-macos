@@ -1,0 +1,47 @@
+{
+  "buttons": {
+    "a": "space",
+    "b": "c",
+    "x": "r",
+    "y": "f",
+    "lb": "q",
+    "rb": "e",
+    "ls": "left_shift",
+    "rs": "left_control",
+    "view": "tab",
+    "menu": "escape"
+  },
+  "left_stick": {
+    "mode": "wasd",
+    "deadzone": 8000
+  },
+  "right_stick": {
+    "mode": "mouse",
+    "sensitivity": 1.5,
+    "curve": 1.8,
+    "smoothing": 0.3
+  },
+  "triggers": {
+    "left": "mouse_left",
+    "right": "mouse_right",
+    "threshold": 127
+  },
+  "features": {
+    "rumble": {
+      "enabled": true,
+      "button_feedback": true
+    },
+    "turbo": {
+      "enabled": true,
+      "rate": 10
+    },
+    "analog_keyboard": {
+      "enabled": false
+    }
+  },
+  "advanced": {
+    "log_level": "info",
+    "streaming_mode": false,
+    "console_output": true
+  }
+}
