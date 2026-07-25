@@ -35,15 +35,74 @@ void usb_cleanup(UsbContext *ctx) {
     LOG_DEBUG("USB context cleaned up");
 }
 
-int usb_open_device(UsbContext *ctx) {
-    LOG_INFO("Looking for Xbox controller...");
+/*
+ * Supported controllers. Endpoint discovery and the GIP init sequence below
+ * are generic, so any GIP (Xbox One / Series) pad can be supported just by
+ * listing its VID/PID here. A product_id of PID_ANY matches any product from
+ * that vendor -- used for the PDP family, whose pads all behave identically
+ * (mirrors the wildcard 0x0e6f entries in the Linux xpad driver).
+ */
+#define PID_ANY 0x0000
 
-    ctx->handle = libusb_open_device_with_vid_pid(ctx->ctx, XBOX_VENDOR_ID, XBOX_PRODUCT_ID);
-    if (!ctx->handle) {
-        LOG_ERROR("Controller not found. Make sure it's plugged in and you're running with sudo");
+typedef struct {
+    uint16_t vendor_id;
+    uint16_t product_id;
+    const char *name;
+} SupportedDevice;
+
+static const SupportedDevice SUPPORTED_DEVICES[] = {
+    {0x045e, 0x02dd, "Xbox One Controller (2015 firmware)"},
+    {0x045e, 0x02ea, "Xbox One S Controller"},
+    {0x045e, 0x0b00, "Xbox Elite Series 2 Controller"},
+    {0x0e6f, PID_ANY, "PDP Wired Controller (Xbox One / Series)"},
+};
+
+int usb_open_device(UsbContext *ctx) {
+    LOG_INFO("Looking for a supported controller...");
+
+    libusb_device **list = NULL;
+    ssize_t count = libusb_get_device_list(ctx->ctx, &list);
+    if (count < 0) {
+        LOG_ERROR("Failed to enumerate USB devices: %s", libusb_error_name((int)count));
         return -1;
     }
-    LOG_INFO("Found controller");
+
+    libusb_device *found = NULL;
+    const SupportedDevice *matched = NULL;
+    uint16_t got_vid = 0, got_pid = 0;
+
+    for (ssize_t i = 0; i < count && !found; i++) {
+        struct libusb_device_descriptor desc;
+        if (libusb_get_device_descriptor(list[i], &desc) != 0) {
+            continue;
+        }
+        for (size_t d = 0; d < sizeof(SUPPORTED_DEVICES) / sizeof(SUPPORTED_DEVICES[0]); d++) {
+            const SupportedDevice *sd = &SUPPORTED_DEVICES[d];
+            if (desc.idVendor == sd->vendor_id &&
+                (sd->product_id == PID_ANY || desc.idProduct == sd->product_id)) {
+                found = list[i];
+                matched = sd;
+                got_vid = desc.idVendor;
+                got_pid = desc.idProduct;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        LOG_ERROR("No supported controller found. Make sure it's plugged in and you're running with sudo");
+        libusb_free_device_list(list, 1);
+        return -1;
+    }
+
+    int open_result = libusb_open(found, &ctx->handle);
+    libusb_free_device_list(list, 1);
+    if (open_result < 0) {
+        LOG_ERROR("Failed to open controller: %s", libusb_error_name(open_result));
+        ctx->handle = NULL;
+        return -1;
+    }
+    LOG_INFO("Found controller: %s (%04x:%04x)", matched->name, got_vid, got_pid);
 
     // Detach kernel driver if attached
     if (libusb_kernel_driver_active(ctx->handle, 0) == 1) {
@@ -171,15 +230,40 @@ int usb_initialize_controller(UsbContext *ctx, bool verbose) {
     }
 
     if (verbose) {
-        LOG_INFO("Initialization complete! Sending POWER ON command...");
+        LOG_INFO("Initialization complete! Sending GIP init sequence...");
     }
 
-    uint8_t power_on[] = {GIP_CMD_POWER, 0x20, 0x00, 0x01, 0x00};
-    result = libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint, power_on,
-                                        sizeof(power_on), &transferred, USB_ACK_TIMEOUT_MS);
+    /*
+     * GIP init sequence, mirroring the Linux xpad driver. PDP pads (0x0e6f)
+     * need power_on -> led_on -> auth_done to start sending input reports;
+     * sending only power_on leaves the LED dark and the pad silent.
+     * Byte [2] of each packet is an incrementing sequence number
+     * (xpad: odata[2] = odata_serial++).
+     */
+    uint8_t power_on[]   = {GIP_CMD_POWER, 0x20, 0x00, 0x01, 0x00};
+    uint8_t led_on[]     = {GIP_CMD_LED, 0x20, 0x00, 0x03, 0x00, 0x01, 0x14};
+    uint8_t auth_done[]  = {GIP_CMD_AUTHENTICATE, 0x20, 0x00, 0x02, 0x01, 0x00};
 
-    if (result == 0 && verbose) {
-        LOG_INFO("Controller powered on!");
+    struct { uint8_t *pkt; int len; const char *name; } init_seq[] = {
+        {power_on,  (int)sizeof(power_on),  "POWER ON"},
+        {led_on,    (int)sizeof(led_on),    "LED ON"},
+        {auth_done, (int)sizeof(auth_done), "AUTH DONE"},
+    };
+
+    uint8_t serial = 0;
+    for (size_t i = 0; i < sizeof(init_seq) / sizeof(init_seq[0]); i++) {
+        init_seq[i].pkt[2] = serial++;   /* fill in sequence number */
+        result = libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint,
+                                            init_seq[i].pkt, init_seq[i].len,
+                                            &transferred, USB_ACK_TIMEOUT_MS);
+        if (verbose) {
+            if (result == 0)
+                LOG_INFO("Sent %s (seq=%d)", init_seq[i].name, serial - 1);
+            else
+                LOG_WARN("Failed to send %s: %s", init_seq[i].name,
+                         libusb_error_name(result));
+        }
+        usleep(50000);
     }
 
     usleep(500000);

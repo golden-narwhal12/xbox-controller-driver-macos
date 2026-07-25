@@ -21,9 +21,19 @@ A userspace driver that translates Xbox One controller input to keyboard and mou
 
 ## Requirements
 
-- macOS (tested on Tahoe 26.1)
-- Xbox One controller with USB cable (Model 1697 confirmed)
+- macOS (tested on Tahoe 26.1 and 26.5)
+- A supported USB controller (see below)
 - Homebrew with libusb and pkg-config
+
+### Supported controllers
+
+Any wired GIP (Xbox One / Series) pad can be added by listing its VID/PID in
+`SUPPORTED_DEVICES[]` in `src/usb/usb.c`. Confirmed working:
+
+| Controller | VID:PID | Tested |
+| --- | --- | --- |
+| Xbox One Controller (Model 1697) | `045e:02dd` | ✅ |
+| PDP Wired Controller for Xbox Series X\|S | `0e6f:*` | ✅ |
 
 ## Installation
 
@@ -83,7 +93,6 @@ For game streaming apps like Moonlight or Parsec, enable streaming mode in your 
 
 ## Limitations
 
-- Only tested with Xbox One Model 1697
 - Simulates keyboard/mouse, not a virtual gamepad
 - Some games that require a real controller won't work
 
