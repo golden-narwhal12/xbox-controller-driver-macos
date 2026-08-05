@@ -36,14 +36,10 @@ void usb_cleanup(UsbContext *ctx) {
 }
 
 /*
- * Supported controllers. Endpoint discovery and the GIP init sequence below
- * are generic, so any GIP (Xbox One / Series) pad can be supported just by
- * listing its VID/PID here. A product_id of PID_ANY matches any product from
- * that vendor -- used for the PDP family, whose pads all behave identically
- * (mirrors the wildcard 0x0e6f entries in the Linux xpad driver).
+ * Supported controllers, matched by exact USB VID:PID. Endpoint discovery and
+ * the GIP init sequence below are generic, so other GIP (Xbox One / Series)
+ * pads can be added by listing their VID/PID here.
  */
-#define PID_ANY 0x0000
-
 typedef struct {
     uint16_t vendor_id;
     uint16_t product_id;
@@ -52,9 +48,7 @@ typedef struct {
 
 static const SupportedDevice SUPPORTED_DEVICES[] = {
     {0x045e, 0x02dd, "Xbox One Controller (2015 firmware)"},
-    {0x045e, 0x02ea, "Xbox One S Controller"},
-    {0x045e, 0x0b00, "Xbox Elite Series 2 Controller"},
-    {0x0e6f, PID_ANY, "PDP Wired Controller (Xbox One / Series)"},
+    {0x0e6f, 0x02de, "PDP Wired Controller for Xbox Series X|S"},
 };
 
 int usb_open_device(UsbContext *ctx) {
@@ -78,8 +72,7 @@ int usb_open_device(UsbContext *ctx) {
         }
         for (size_t d = 0; d < sizeof(SUPPORTED_DEVICES) / sizeof(SUPPORTED_DEVICES[0]); d++) {
             const SupportedDevice *sd = &SUPPORTED_DEVICES[d];
-            if (desc.idVendor == sd->vendor_id &&
-                (sd->product_id == PID_ANY || desc.idProduct == sd->product_id)) {
+            if (desc.idVendor == sd->vendor_id && desc.idProduct == sd->product_id) {
                 found = list[i];
                 matched = sd;
                 got_vid = desc.idVendor;

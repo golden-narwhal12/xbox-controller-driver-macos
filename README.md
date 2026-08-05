@@ -27,13 +27,14 @@ A userspace driver that translates Xbox One controller input to keyboard and mou
 
 ### Supported controllers
 
-Any wired GIP (Xbox One / Series) pad can be added by listing its VID/PID in
-`SUPPORTED_DEVICES[]` in `src/usb/usb.c`. Confirmed working:
+Other wired GIP (Xbox One / Series) pads can be added by listing their exact
+VID:PID in `SUPPORTED_DEVICES[]` in `src/usb/usb.c` (only add controllers you
+can test -- some models need extra init packets). Confirmed working:
 
 | Controller | VID:PID | Tested |
 | --- | --- | --- |
 | Xbox One Controller (Model 1697) | `045e:02dd` | ✅ |
-| PDP Wired Controller for Xbox Series X\|S | `0e6f:*` | ✅ |
+| PDP Wired Controller for Xbox Series X\|S | `0e6f:02de` | ✅ |
 
 ## Installation
 
