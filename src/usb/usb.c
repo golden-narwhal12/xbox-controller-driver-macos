@@ -63,38 +63,42 @@ int usb_open_device(UsbContext *ctx) {
         return -1;
     }
 
-    libusb_device *found = NULL;
     const SupportedDevice *matched = NULL;
     uint16_t got_vid = 0, got_pid = 0;
 
-    for (ssize_t i = 0; i < count && !found; i++) {
+    for (ssize_t i = 0; i < count && ctx->handle == NULL; i++) {
         struct libusb_device_descriptor desc;
         if (libusb_get_device_descriptor(list[i], &desc) != 0) {
             continue;
         }
         for (size_t d = 0; d < sizeof(SUPPORTED_DEVICES) / sizeof(SUPPORTED_DEVICES[0]); d++) {
             const SupportedDevice *sd = &SUPPORTED_DEVICES[d];
-            if (desc.idVendor == sd->vendor_id && desc.idProduct == sd->product_id) {
-                found = list[i];
-                matched = sd;
-                got_vid = desc.idVendor;
-                got_pid = desc.idProduct;
+            if (desc.idVendor != sd->vendor_id || desc.idProduct != sd->product_id) {
+                continue;
+            }
+
+            int open_result = libusb_open(list[i], &ctx->handle);
+            if (open_result < 0) {
+                /* Matched, but couldn't open it -- keep looking for another. */
+                LOG_WARN("Found %s (%04x:%04x) but could not open it: %s; trying next match",
+                         sd->name, desc.idVendor, desc.idProduct,
+                         libusb_error_name(open_result));
+                ctx->handle = NULL;
                 break;
             }
+
+            matched = sd;
+            got_vid = desc.idVendor;
+            got_pid = desc.idProduct;
+            break;
         }
     }
 
-    if (!found) {
-        LOG_ERROR("No supported controller found. Make sure it's plugged in and you're running with sudo");
-        libusb_free_device_list(list, 1);
-        return -1;
-    }
-
-    int open_result = libusb_open(found, &ctx->handle);
     libusb_free_device_list(list, 1);
-    if (open_result < 0) {
-        LOG_ERROR("Failed to open controller: %s", libusb_error_name(open_result));
-        ctx->handle = NULL;
+
+    if (ctx->handle == NULL) {
+        LOG_ERROR("No supported controller found (or none could be opened). "
+                  "Make sure it's plugged in and you're running with sudo");
         return -1;
     }
     LOG_INFO("Found controller: %s (%04x:%04x)", matched->name, got_vid, got_pid);
@@ -251,12 +255,13 @@ int usb_initialize_controller(UsbContext *ctx, bool verbose) {
         result = libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint,
                                             init_seq[i].pkt, init_seq[i].len,
                                             &transferred, USB_ACK_TIMEOUT_MS);
+        if (result != 0) {
+            LOG_ERROR("Failed to send %s init packet: %s", init_seq[i].name,
+                      libusb_error_name(result));
+            return -1;
+        }
         if (verbose) {
-            if (result == 0)
-                LOG_INFO("Sent %s (seq=%d)", init_seq[i].name, serial - 1);
-            else
-                LOG_WARN("Failed to send %s: %s", init_seq[i].name,
-                         libusb_error_name(result));
+            LOG_INFO("Sent %s (seq=%d)", init_seq[i].name, serial - 1);
         }
         usleep(50000);
     }

@@ -208,7 +208,11 @@ void driver_input_loop(DriverContext *ctx) {
                 sleep(RECONNECT_DELAY_MS / 1000);
 
                 if (usb_open_device(&ctx->usb) == 0) {
-                    usb_initialize_controller(&ctx->usb, ctx->verbose);
+                    if (usb_initialize_controller(&ctx->usb, ctx->verbose) != 0) {
+                        LOG_WARN("Reconnect: controller init failed, retrying...");
+                        usb_close_device(&ctx->usb);
+                        continue;
+                    }
                     LOG_INFO("Reconnected!");
                     break;
                 }
@@ -248,7 +252,11 @@ int driver_run(DriverContext *ctx) {
     }
 
     // Initialize controller
-    usb_initialize_controller(&ctx->usb, ctx->verbose);
+    if (usb_initialize_controller(&ctx->usb, ctx->verbose) != 0) {
+        LOG_ERROR("Failed to initialize controller");
+        usb_close_device(&ctx->usb);
+        return -1;
+    }
 
     // Run input loop
     driver_input_loop(ctx);
