@@ -31,10 +31,12 @@ Other wired GIP (Xbox One / Series) pads can be added by listing their exact
 VID:PID in `SUPPORTED_DEVICES[]` in `src/usb/usb.c` (only add controllers you
 can test -- some models need extra init packets). Confirmed working:
 
-| Controller | VID:PID | Tested |
-| --- | --- | --- |
-| Xbox One Controller (Model 1697) | `045e:02dd` | ✅ |
-| PDP Wired Controller for Xbox Series X\|S | `0e6f:02de` | ✅ |
+| Controller                                             | VID:PID     | Tested |
+| ------------------------------------------------------ | ----------- | ------ |
+| Xbox One Controller (Model 1697)                       | `045e:02dd` | ✅     |
+| PDP Wired Controller for Xbox Series X\|S (White Camo) | `0e6f:02de` | ✅     |
+| PDP Wired Controller for Xbox Series X\|S (Blue Camo)  | `0e6f:02d8` | ✅     |
+| PowerA/BDA XB1 Classic Controller                      | `24c6:581a` | ✅     |
 
 ## Installation
 
@@ -52,10 +54,10 @@ Edit `config/controller.json` to customize mappings. Changes are picked up autom
 
 ```json
 {
-  "buttons": { "a": "space", "b": "c", "x": "r", "y": "f" },
-  "left_stick": { "mode": "wasd", "deadzone": 8000 },
-  "right_stick": { "mode": "mouse", "sensitivity": 1.5, "curve": 1.8 },
-  "triggers": { "left": "mouse_left", "right": "mouse_right" }
+    "buttons": { "a": "space", "b": "c", "x": "r", "y": "f" },
+    "left_stick": { "mode": "wasd", "deadzone": 8000 },
+    "right_stick": { "mode": "mouse", "sensitivity": 1.5, "curve": 1.8 },
+    "triggers": { "left": "mouse_left", "right": "mouse_right" }
 }
 ```
 
@@ -78,7 +80,7 @@ For game streaming apps like Moonlight or Parsec, enable streaming mode in your 
 
 ```json
 {
-  "advanced": { "streaming_mode": true }
+    "advanced": { "streaming_mode": true }
 }
 ```
 

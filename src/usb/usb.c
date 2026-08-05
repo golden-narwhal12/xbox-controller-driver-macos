@@ -48,7 +48,9 @@ typedef struct {
 
 static const SupportedDevice SUPPORTED_DEVICES[] = {
     {0x045e, 0x02dd, "Xbox One Controller (2015 firmware)"},
-    {0x0e6f, 0x02de, "PDP Wired Controller for Xbox Series X|S"},
+    {0x0e6f, 0x02de, "PDP Wired Controller for Xbox Series X|S (White Camo)"},
+    {0x0e6f, 0x02d8, "PDP Wired Controller for Xbox Series X|S (Blue Camo)"},
+    {0x24c6, 0x581a, "PowerA/BDA XB1 Classic Controller"},
 };
 
 int usb_open_device(UsbContext *ctx) {
