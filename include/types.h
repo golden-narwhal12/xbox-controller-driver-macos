@@ -63,8 +63,7 @@ typedef enum {
 /*******************************************************************************
  * USB Constants
  ******************************************************************************/
-#define XBOX_VENDOR_ID         0x045e
-#define XBOX_PRODUCT_ID        0x02dd
+/* Supported controllers are listed in SUPPORTED_DEVICES[] (src/usb/usb.c) */
 #define USB_BUFFER_SIZE        64
 #define USB_TIMEOUT_MS         10
 #define USB_INIT_TIMEOUT_MS    2000
