@@ -12,6 +12,7 @@
  * Configuration File Paths
  ******************************************************************************/
 #define CONFIG_PATH_LOCAL "./controller.json"
+#define CONFIG_PATH_PROJECT "./config/controller.json"
 #define CONFIG_PATH_USER "/.config/xbox-controller/config.json"
 #define CONFIG_PATH_MAX 512
 
@@ -32,7 +33,7 @@ int config_load(const char *path, ControllerMapping *mapping);
 
 /**
  * Load configuration with automatic path detection
- * Priority: CLI arg > ./controller.json > ~/.config/xbox-controller/config.json > defaults
+ * Priority: CLI arg > ./controller.json > ./config/controller.json > user config > defaults
  */
 int config_load_auto(const char *cli_path, ControllerMapping *mapping, char *loaded_path, size_t path_size);
 
@@ -40,7 +41,7 @@ int config_load_auto(const char *cli_path, ControllerMapping *mapping, char *loa
  * Reload configuration if file has changed
  * Returns 1 if reloaded, 0 if unchanged, -1 on error
  */
-int config_reload_if_changed(const char *path, ControllerMapping *mapping, time_t *last_modified);
+int config_reload_if_changed(const char *path, ControllerMapping *mapping, struct timespec *last_modified);
 
 /**
  * Save current configuration to file

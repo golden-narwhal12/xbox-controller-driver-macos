@@ -17,8 +17,9 @@ typedef struct {
     ControllerMapping config;
     InputState input_state;
     char config_path[512];
-    time_t config_last_modified;
+    struct timespec config_last_modified;
     bool verbose;
+    bool rumble_pending;
 } DriverContext;
 
 /*******************************************************************************
@@ -31,12 +32,13 @@ int driver_run(DriverContext *ctx);
 /*******************************************************************************
  * Input Loop
  ******************************************************************************/
-void driver_input_loop(DriverContext *ctx);
+int driver_input_loop(DriverContext *ctx);
 
 /*******************************************************************************
  * Signal Handling
  ******************************************************************************/
 void driver_request_stop(void);
+void driver_request_reload(void);
 bool driver_should_stop(void);
 
 #endif // DRIVER_H

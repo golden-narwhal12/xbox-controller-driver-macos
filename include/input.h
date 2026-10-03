@@ -21,7 +21,7 @@ void process_buttons(uint16_t buttons, InputState *state, const ControllerMappin
 /*******************************************************************************
  * Trigger Processing
  ******************************************************************************/
-void process_triggers(uint8_t left_trigger, uint8_t right_trigger,
+void process_triggers(uint16_t left_trigger, uint16_t right_trigger,
                       InputState *state, const ControllerMapping *config);
 
 /*******************************************************************************
@@ -30,7 +30,7 @@ void process_triggers(uint8_t left_trigger, uint8_t right_trigger,
 void process_stick_as_keys(int16_t x, int16_t y,
                            uint16_t key_up, uint16_t key_down,
                            uint16_t key_left, uint16_t key_right,
-                           InputState *state);
+                           InputState *state, int source_base);
 
 void process_stick_as_mouse(int16_t x, int16_t y,
                             float *smoothed_x, float *smoothed_y,

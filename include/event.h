@@ -23,6 +23,8 @@ void send_key_event(uint16_t keycode, bool pressed);
  * Mouse Event Functions
  ******************************************************************************/
 void send_mouse_button_event(int button, bool pressed);
-void send_mouse_movement(float dx, float dy, bool streaming_mode);
+void send_mouse_movement(float dx, float dy, bool streaming_mode,
+                         bool left_down, bool right_down, bool middle_down);
+void event_cleanup(void);
 
 #endif // EVENT_H

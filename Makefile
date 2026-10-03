@@ -5,7 +5,9 @@ CC = gcc
 OBJCC = clang
 CFLAGS = -Wall -Wextra -O2 -I./include
 OBJCFLAGS = -Wall -Wextra -O2 -I./include -fobjc-arc
-LIBUSB_FLAGS = $(shell pkg-config --cflags --libs libusb-1.0)
+DEPFLAGS = -MMD -MP
+LIBUSB_CFLAGS = $(shell pkg-config --cflags libusb-1.0)
+LIBUSB_LIBS = $(shell pkg-config --libs libusb-1.0)
 FRAMEWORK_FLAGS = -framework CoreGraphics -framework ApplicationServices
 COCOA_FLAGS = -framework Cocoa
 LDFLAGS = -lm -lpthread
@@ -47,35 +49,35 @@ build:
 
 # Object file compilation
 $(OBJ_LOG): $(SRC_LOG) | build
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(OBJ_CONFIG): $(SRC_CONFIG) | build
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(OBJ_EVENT): $(SRC_EVENT) | build
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(OBJ_INPUT): $(SRC_INPUT) | build
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(OBJ_USB): $(SRC_USB) | build
-	$(CC) $(CFLAGS) $(LIBUSB_FLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
 
 $(OBJ_DRIVER): $(SRC_DRIVER) | build
-	$(CC) $(CFLAGS) $(LIBUSB_FLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
 
 $(OBJ_MAIN_CLI): $(SRC_MAIN_CLI) | build
-	$(CC) $(CFLAGS) $(LIBUSB_FLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
 
 $(OBJ_MAIN_GUI): $(SRC_MAIN_GUI) | build
-	$(CC) $(CFLAGS) $(LIBUSB_FLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
 
 $(OBJ_MENUBAR): $(SRC_MENUBAR) | build
-	$(OBJCC) $(OBJCFLAGS) $(COCOA_FLAGS) -c $< -o $@
+	$(OBJCC) $(OBJCFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Main simulator with GUI (default)
 simulator: $(OBJS_GUI)
-	$(CC) $(CFLAGS) $(OBJS_GUI) $(LIBUSB_FLAGS) $(FRAMEWORK_FLAGS) $(COCOA_FLAGS) $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $(OBJS_GUI) $(LIBUSB_LIBS) $(FRAMEWORK_FLAGS) $(COCOA_FLAGS) $(LDFLAGS) -o $@
 	@echo ""
 	@echo "Built simulator successfully!"
 	@echo "   Run with: sudo ./simulator"
@@ -88,7 +90,7 @@ simulator: $(OBJS_GUI)
 
 # CLI-only simulator (no menu bar)
 simulator-cli: $(OBJS_CLI)
-	$(CC) $(CFLAGS) $(OBJS_CLI) $(LIBUSB_FLAGS) $(FRAMEWORK_FLAGS) $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $(OBJS_CLI) $(LIBUSB_LIBS) $(FRAMEWORK_FLAGS) $(LDFLAGS) -o $@
 	@echo ""
 	@echo "Built simulator-cli successfully!"
 	@echo "   Run with: sudo ./simulator-cli"
@@ -97,19 +99,19 @@ simulator-cli: $(OBJS_CLI)
 
 # Legacy targets (for compatibility) - all sources in legacy/
 xbox_usb_test: legacy/phase2_usb_test.c
-	$(CC) $(CFLAGS) $< $(LIBUSB_FLAGS) -o $@
+	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) $< $(LIBUSB_LIBS) -o $@
 
 xbox_gip_test: legacy/phase3_gip_test.c legacy/gip.h
-	$(CC) $(CFLAGS) -I./legacy $< $(LIBUSB_FLAGS) -o $@
+	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -I./legacy $< $(LIBUSB_LIBS) -o $@
 
 simulator-legacy: legacy/simulator.c legacy/gip.h legacy/keymapping.h
-	$(CC) $(CFLAGS) -I./legacy $< $(LIBUSB_FLAGS) $(FRAMEWORK_FLAGS) -o $@ -lm
+	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -I./legacy $< $(LIBUSB_LIBS) $(FRAMEWORK_FLAGS) -o $@ -lm
 	@echo ""
 	@echo "Built legacy simulator successfully!"
 	@echo "   This is the original single-file version."
 
 # Test targets
-test: test-input test-config test-lut
+test: test-input test-input-runtime test-config test-lut
 	@echo ""
 	@echo "All tests completed!"
 
@@ -118,6 +120,10 @@ test-input: tests/test_input.c include/types.h | build
 	@echo ""
 	@echo "Running input tests..."
 	@./build/test_input
+
+test-input-runtime: tests/test_input_runtime.c src/input/input.c src/config/config.c src/log.c | build
+	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) tests/test_input_runtime.c src/input/input.c src/config/config.c src/log.c -o build/test_input_runtime -lm
+	@./build/test_input_runtime
 
 test-config: tests/test_config.c src/config/config.c include/types.h include/config.h src/log.c | build
 	$(CC) $(CFLAGS) tests/test_config.c src/config/config.c src/log.c -o build/test_config -lm
@@ -184,4 +190,6 @@ help:
 	@echo ""
 	@echo "Note: Requires accessibility permissions for keyboard/mouse input"
 
-.PHONY: all clean deps help test test-input test-config test-lut install-config
+.PHONY: all clean deps help test test-input test-input-runtime test-config test-lut install-config
+
+-include $(wildcard build/*.d)

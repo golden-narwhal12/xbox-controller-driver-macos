@@ -50,7 +50,7 @@ Grant Accessibility permissions when prompted: System Settings > Privacy & Secur
 
 ## Configuration
 
-Edit `config/controller.json` to customize mappings. Changes are picked up automatically while running.
+Edit `config/controller.json` to customize mappings when running from the repository. Changes are picked up automatically while running. An explicit `--config` path or a `./controller.json` file takes priority; outside the repository you can use `~/.config/xbox-controller/config.json`.
 
 ```json
 {
@@ -64,6 +64,8 @@ Edit `config/controller.json` to customize mappings. Changes are picked up autom
 You can also place your config at `~/.config/xbox-controller/config.json`.
 
 Key names: letters (a-z), numbers (0-9), space, tab, escape, return, left_shift, left_control, up, down, left, right, f1-f12, mouse_left, mouse_right.
+
+Buttons (including `dpad_up`, `dpad_down`, `dpad_left`, and `dpad_right`) can map to keys or mouse buttons. Each stick can also specify `up`, `down`, `left`, and `right` key names when using a keyboard mode. Trigger `threshold` remains on a 0-255 scale; the driver's 10-bit trigger readings are scaled to match it. A held trigger keeps its mouse button or key pressed until release.
 
 ## Build Targets
 
@@ -84,6 +86,8 @@ For game streaming apps like Moonlight or Parsec, enable streaming mode in your 
 }
 ```
 
+This posts relative mouse deltas so a held look stick can keep turning in apps that capture relative mouse input. Normal mode moves the macOS cursor. Movement while a mouse button is held is posted as a drag, which is needed for aiming or drawing gestures in some apps.
+
 ## Troubleshooting
 
 **Keys not working:** Add your terminal to Accessibility permissions in System Settings.
@@ -98,6 +102,7 @@ For game streaming apps like Moonlight or Parsec, enable streaming mode in your 
 
 - Simulates keyboard/mouse, not a virtual gamepad
 - Some games that require a real controller won't work
+- Games that rely on an uncaptured cursor may stop turning at the screen edge; relative mode depends on the game or streaming app accepting mouse deltas
 
 ## How It Works
 

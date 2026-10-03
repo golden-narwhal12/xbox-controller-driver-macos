@@ -10,13 +10,16 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdatomic.h>
 
 /*******************************************************************************
  * Global State
  ******************************************************************************/
 static DriverContext g_ctx;
 static pthread_t g_driver_thread;
-static bool g_driver_running = false;
+static pthread_t g_status_thread;
+static atomic_bool g_driver_running;
+static int g_driver_result;
 
 /*******************************************************************************
  * Callbacks
@@ -24,11 +27,7 @@ static bool g_driver_running = false;
 static void on_reload_config(void *context) {
     (void)context;
     printf("Reloading configuration...\n");
-
-    // The driver's hot-reload mechanism will pick this up
-    // Force reload by touching the modification time
-    time_t now = time(NULL);
-    g_ctx.config_last_modified = now - 10;  // Force reload check
+    driver_request_reload();
 }
 
 static void on_quit(void *context) {
@@ -45,12 +44,13 @@ static void *driver_thread_func(void *arg) {
 
     // Run the driver
     int result = driver_run(&g_ctx);
+    g_driver_result = result;
 
     if (result != 0) {
         menubar_set_status("Error - Check console");
     }
 
-    g_driver_running = false;
+    atomic_store(&g_driver_running, false);
 
     // Request quit if driver exits
     menubar_quit();
@@ -58,9 +58,11 @@ static void *driver_thread_func(void *arg) {
     return NULL;
 }
 
-static void start_driver_thread(void) {
-    g_driver_running = true;
-    pthread_create(&g_driver_thread, NULL, driver_thread_func, NULL);
+static int start_driver_thread(void) {
+    atomic_store(&g_driver_running, true);
+    int result = pthread_create(&g_driver_thread, NULL, driver_thread_func, NULL);
+    if (result != 0) atomic_store(&g_driver_running, false);
+    return result;
 }
 
 /*******************************************************************************
@@ -69,7 +71,7 @@ static void start_driver_thread(void) {
 static void *status_thread_func(void *arg) {
     (void)arg;
 
-    while (g_driver_running) {
+    while (atomic_load(&g_driver_running)) {
         if (g_ctx.usb.connected) {
             menubar_set_status("Connected");
             menubar_set_connected(true);
@@ -84,10 +86,8 @@ static void *status_thread_func(void *arg) {
     return NULL;
 }
 
-static void start_status_thread(void) {
-    pthread_t status_thread;
-    pthread_create(&status_thread, NULL, status_thread_func, NULL);
-    pthread_detach(status_thread);
+static int start_status_thread(void) {
+    return pthread_create(&g_status_thread, NULL, status_thread_func, NULL);
 }
 
 /*******************************************************************************
@@ -129,23 +129,27 @@ int main(int argc, char *argv[]) {
     menubar_set_status("Initializing...");
 
     // Start driver in background thread
-    start_driver_thread();
+    atomic_init(&g_driver_running, false);
+    if (start_driver_thread() != 0) {
+        fprintf(stderr, "Failed to start driver thread\n");
+        driver_cleanup(&g_ctx);
+        return 1;
+    }
 
     // Start status update thread
-    start_status_thread();
+    bool status_started = start_status_thread() == 0;
 
     // Run menu bar event loop (blocks until quit)
     // This must be on the main thread for macOS
     menubar_run();
 
     // Wait for driver thread to finish
-    if (g_driver_running) {
-        driver_request_stop();
-        pthread_join(g_driver_thread, NULL);
-    }
+    driver_request_stop();
+    pthread_join(g_driver_thread, NULL);
+    if (status_started) pthread_join(g_status_thread, NULL);
 
     // Cleanup
     driver_cleanup(&g_ctx);
 
-    return 0;
+    return g_driver_result;
 }

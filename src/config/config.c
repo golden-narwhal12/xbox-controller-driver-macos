@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <pwd.h>
+#include <math.h>
 
 /*******************************************************************************
  * Key Name to Keycode Mapping
@@ -152,7 +153,9 @@ uint16_t config_parse_key(const char *key_name) {
 
     // Try parsing as hex (0x##)
     if (len > 2 && lower[0] == '0' && lower[1] == 'x') {
-        return (uint16_t)strtol(lower, NULL, 16);
+        char *end;
+        long value = strtol(lower, &end, 16);
+        if (*end == '\0' && value >= 0 && value <= 255) return (uint16_t)value;
     }
 
     return 0xFFFF;
@@ -198,20 +201,21 @@ static const char* skip_whitespace(const char *p) {
 
 static const char* parse_string(const char *p, char *out, size_t out_size) {
     p = skip_whitespace(p);
+    if (out_size) out[0] = '\0';
     if (*p != '"') return NULL;
     p++;
 
     size_t i = 0;
-    while (*p && *p != '"' && i < out_size - 1) {
+    while (*p && *p != '"') {
         if (*p == '\\' && *(p+1)) {
             p++;
         }
-        out[i++] = *p++;
+        if (i < out_size - 1) out[i++] = *p;
+        p++;
     }
     out[i] = '\0';
 
-    if (*p == '"') p++;
-    return p;
+    return *p == '"' ? p + 1 : NULL;
 }
 
 static const char* parse_number(const char *p, double *out) {
@@ -233,18 +237,68 @@ static const char* parse_bool(const char *p, bool *out) {
     return NULL;
 }
 
-static const char* find_key(const char *json, const char *key) {
-    char search[128];
-    snprintf(search, sizeof(search), "\"%s\"", key);
-
-    const char *p = strstr(json, search);
-    if (!p) return NULL;
-
-    p += strlen(search);
+static const char* skip_value(const char *p, int depth) {
+    if (depth > 16) return NULL;
     p = skip_whitespace(p);
-    if (*p != ':') return NULL;
-    p++;
-    return skip_whitespace(p);
+    if (*p == '"') {
+        char ignored[1];
+        return parse_string(p, ignored, sizeof(ignored));
+    }
+    if (*p == '{' || *p == '[') {
+        char closing = *p++ == '{' ? '}' : ']';
+        p = skip_whitespace(p);
+        while (*p && *p != closing) {
+            if (closing == '}') {
+                char ignored[1];
+                p = parse_string(p, ignored, sizeof(ignored));
+                if (!p) return NULL;
+                p = skip_whitespace(p);
+                if (*p++ != ':') return NULL;
+            }
+            p = skip_value(p, depth + 1);
+            if (!p) return NULL;
+            p = skip_whitespace(p);
+            if (*p == ',') p = skip_whitespace(p + 1);
+            else if (*p != closing) return NULL;
+        }
+        return *p == closing ? p + 1 : NULL;
+    }
+    if (strncmp(p, "true", 4) == 0) return p + 4;
+    if (strncmp(p, "false", 5) == 0) return p + 5;
+    if (strncmp(p, "null", 4) == 0) return p + 4;
+    char *end;
+    double number = strtod(p, &end);
+    return end != p && isfinite(number) ? end : NULL;
+}
+
+static const char* find_key(const char *json, const char *key) {
+    const char *p = skip_whitespace(json);
+    if (*p++ != '{') return NULL;
+    p = skip_whitespace(p);
+    while (*p && *p != '}') {
+        char name[128];
+        p = parse_string(p, name, sizeof(name));
+        if (!p) return NULL;
+        p = skip_whitespace(p);
+        if (*p++ != ':') return NULL;
+        p = skip_whitespace(p);
+        if (strcmp(name, key) == 0) return p;
+        p = skip_value(p, 1);
+        if (!p) return NULL;
+        p = skip_whitespace(p);
+        if (*p == ',') p = skip_whitespace(p + 1);
+        else if (*p != '}') return NULL;
+    }
+    return NULL;
+}
+
+static void load_key_binding(const char *object, const char *name, uint16_t *binding) {
+    const char *value = find_key(object, name);
+    char key_name[64];
+    if (value && parse_string(value, key_name, sizeof(key_name))) {
+        uint16_t parsed = config_parse_key(key_name);
+        if (parsed != 0xFFFF) *binding = parsed;
+    }
 }
 
 /*******************************************************************************
@@ -257,6 +311,13 @@ int config_load(const char *path, ControllerMapping *mapping) {
     char *json = read_file(path);
     if (!json) {
         LOG_DEBUG("Could not open config file: %s", path);
+        return -1;
+    }
+
+    const char *end = skip_value(json, 0);
+    if (*skip_whitespace(json) != '{' || !end || *skip_whitespace(end) != '\0') {
+        LOG_ERROR("Invalid configuration JSON: %s", path);
+        free(json);
         return -1;
     }
 
@@ -320,11 +381,35 @@ int config_load(const char *path, ControllerMapping *mapping) {
             uint16_t key = config_parse_key(str_val);
             if (key != 0xFFFF) mapping->buttons.key_menu = key;
         }
+        if ((p = find_key(buttons, "dpad_up"))) {
+            parse_string(p, str_val, sizeof(str_val));
+            uint16_t key = config_parse_key(str_val);
+            if (key != 0xFFFF) mapping->buttons.key_dpad_up = key;
+        }
+        if ((p = find_key(buttons, "dpad_down"))) {
+            parse_string(p, str_val, sizeof(str_val));
+            uint16_t key = config_parse_key(str_val);
+            if (key != 0xFFFF) mapping->buttons.key_dpad_down = key;
+        }
+        if ((p = find_key(buttons, "dpad_left"))) {
+            parse_string(p, str_val, sizeof(str_val));
+            uint16_t key = config_parse_key(str_val);
+            if (key != 0xFFFF) mapping->buttons.key_dpad_left = key;
+        }
+        if ((p = find_key(buttons, "dpad_right"))) {
+            parse_string(p, str_val, sizeof(str_val));
+            uint16_t key = config_parse_key(str_val);
+            if (key != 0xFFFF) mapping->buttons.key_dpad_right = key;
+        }
     }
 
     // Parse left_stick
     const char *left_stick = find_key(json, "left_stick");
     if (left_stick) {
+        load_key_binding(left_stick, "up", &mapping->sticks.left_up);
+        load_key_binding(left_stick, "down", &mapping->sticks.left_down);
+        load_key_binding(left_stick, "left", &mapping->sticks.left_left);
+        load_key_binding(left_stick, "right", &mapping->sticks.left_right);
         if ((p = find_key(left_stick, "mode"))) {
             parse_string(p, str_val, sizeof(str_val));
             if (strcmp(str_val, "wasd") == 0) mapping->sticks.left_stick_mode = STICK_MODE_WASD;
@@ -333,14 +418,18 @@ int config_load(const char *path, ControllerMapping *mapping) {
             else if (strcmp(str_val, "disabled") == 0) mapping->sticks.left_stick_mode = STICK_MODE_DISABLED;
         }
         if ((p = find_key(left_stick, "deadzone"))) {
-            parse_number(p, &num_val);
-            mapping->sticks.deadzone = (int16_t)num_val;
+            if (parse_number(p, &num_val) != p && num_val >= 0 && num_val <= STICK_MAX)
+                mapping->sticks.deadzone = (int16_t)num_val;
         }
     }
 
     // Parse right_stick
     const char *right_stick = find_key(json, "right_stick");
     if (right_stick) {
+        load_key_binding(right_stick, "up", &mapping->sticks.right_up);
+        load_key_binding(right_stick, "down", &mapping->sticks.right_down);
+        load_key_binding(right_stick, "left", &mapping->sticks.right_left);
+        load_key_binding(right_stick, "right", &mapping->sticks.right_right);
         if ((p = find_key(right_stick, "mode"))) {
             parse_string(p, str_val, sizeof(str_val));
             if (strcmp(str_val, "wasd") == 0) mapping->sticks.right_stick_mode = STICK_MODE_WASD;
@@ -349,16 +438,16 @@ int config_load(const char *path, ControllerMapping *mapping) {
             else if (strcmp(str_val, "disabled") == 0) mapping->sticks.right_stick_mode = STICK_MODE_DISABLED;
         }
         if ((p = find_key(right_stick, "sensitivity"))) {
-            parse_number(p, &num_val);
-            mapping->sticks.mouse_sensitivity = (float)num_val;
+            if (parse_number(p, &num_val) != p && num_val >= 0 && num_val <= 100)
+                mapping->sticks.mouse_sensitivity = (float)num_val;
         }
         if ((p = find_key(right_stick, "curve"))) {
-            parse_number(p, &num_val);
-            mapping->sticks.mouse_curve = (float)num_val;
+            if (parse_number(p, &num_val) != p && num_val > 0 && num_val <= 10)
+                mapping->sticks.mouse_curve = (float)num_val;
         }
         if ((p = find_key(right_stick, "smoothing"))) {
-            parse_number(p, &num_val);
-            mapping->sticks.mouse_smoothing = (float)num_val;
+            if (parse_number(p, &num_val) != p && num_val >= 0 && num_val <= 1)
+                mapping->sticks.mouse_smoothing = (float)num_val;
         }
     }
 
@@ -394,8 +483,8 @@ int config_load(const char *path, ControllerMapping *mapping) {
             }
         }
         if ((p = find_key(triggers, "threshold"))) {
-            parse_number(p, &num_val);
-            mapping->triggers.threshold = (uint8_t)num_val;
+            if (parse_number(p, &num_val) != p && num_val >= 0 && num_val <= 255)
+                mapping->triggers.threshold = (uint8_t)num_val;
         }
     }
 
@@ -410,6 +499,14 @@ int config_load(const char *path, ControllerMapping *mapping) {
             if ((p = find_key(rumble, "button_feedback"))) {
                 if (parse_bool(p, &bool_val)) mapping->features.rumble.button_feedback = bool_val;
             }
+            if ((p = find_key(rumble, "intensity"))) {
+                if (parse_number(p, &num_val) != p && num_val >= 0 && num_val <= 255)
+                    mapping->features.rumble.intensity = (uint8_t)num_val;
+            }
+            if ((p = find_key(rumble, "duration_ms"))) {
+                if (parse_number(p, &num_val) != p && num_val >= 0 && num_val <= 2550)
+                    mapping->features.rumble.duration_ms = (uint16_t)num_val;
+            }
         }
         const char *turbo = find_key(features, "turbo");
         if (turbo) {
@@ -417,8 +514,8 @@ int config_load(const char *path, ControllerMapping *mapping) {
                 if (parse_bool(p, &bool_val)) mapping->features.turbo.enabled = bool_val;
             }
             if ((p = find_key(turbo, "rate"))) {
-                parse_number(p, &num_val);
-                mapping->features.turbo.rate = (uint8_t)num_val;
+                if (parse_number(p, &num_val) != p && num_val >= 1 && num_val <= 255)
+                    mapping->features.turbo.rate = (uint8_t)num_val;
             }
         }
         const char *analog = find_key(features, "analog_keyboard");
@@ -456,20 +553,30 @@ int config_load_auto(const char *cli_path, ControllerMapping *mapping, char *loa
     // Priority 1: CLI argument
     if (cli_path && strlen(cli_path) > 0) {
         if (config_load(cli_path, mapping) == 0) {
-            if (loaded_path) strncpy(loaded_path, cli_path, path_size);
+            if (loaded_path && path_size) snprintf(loaded_path, path_size, "%s", cli_path);
             return 0;
         }
+        LOG_ERROR("Could not load requested configuration: %s", cli_path);
+        return -1;
     }
 
     // Priority 2: Local config
     if (access(CONFIG_PATH_LOCAL, R_OK) == 0) {
         if (config_load(CONFIG_PATH_LOCAL, mapping) == 0) {
-            if (loaded_path) strncpy(loaded_path, CONFIG_PATH_LOCAL, path_size);
+            if (loaded_path && path_size) snprintf(loaded_path, path_size, "%s", CONFIG_PATH_LOCAL);
             return 0;
         }
     }
 
-    // Priority 3: User config
+    // Priority 3: Repository config template when running from the checkout
+    if (access(CONFIG_PATH_PROJECT, R_OK) == 0) {
+        if (config_load(CONFIG_PATH_PROJECT, mapping) == 0) {
+            if (loaded_path && path_size) snprintf(loaded_path, path_size, "%s", CONFIG_PATH_PROJECT);
+            return 0;
+        }
+    }
+
+    // Priority 4: User config
     const char *home = getenv("HOME");
     if (!home) {
         struct passwd *pw = getpwuid(getuid());
@@ -482,27 +589,31 @@ int config_load_auto(const char *cli_path, ControllerMapping *mapping, char *loa
 
         if (access(user_config, R_OK) == 0) {
             if (config_load(user_config, mapping) == 0) {
-                if (loaded_path) strncpy(loaded_path, user_config, path_size);
+                if (loaded_path && path_size) snprintf(loaded_path, path_size, "%s", user_config);
                 return 0;
             }
         }
     }
 
-    // Priority 4: Defaults
+    // Priority 5: Defaults
     config_get_defaults(mapping);
-    if (loaded_path) strncpy(loaded_path, "(defaults)", path_size);
+    if (loaded_path && path_size) snprintf(loaded_path, path_size, "%s", "(defaults)");
     return 0;
 }
 
-int config_reload_if_changed(const char *path, ControllerMapping *mapping, time_t *last_modified) {
+int config_reload_if_changed(const char *path, ControllerMapping *mapping, struct timespec *last_modified) {
     struct stat st;
     if (stat(path, &st) != 0) {
         return -1;
     }
 
-    if (st.st_mtime > *last_modified) {
-        *last_modified = st.st_mtime;
-        if (config_load(path, mapping) == 0) {
+    if (st.st_mtimespec.tv_sec > last_modified->tv_sec ||
+        (st.st_mtimespec.tv_sec == last_modified->tv_sec &&
+         st.st_mtimespec.tv_nsec > last_modified->tv_nsec)) {
+        ControllerMapping next;
+        if (config_load(path, &next) == 0) {
+            *mapping = next;
+            *last_modified = st.st_mtimespec;
             LOG_INFO("Configuration reloaded");
             return 1;
         }

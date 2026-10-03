@@ -13,6 +13,7 @@
  ******************************************************************************/
 int usb_init(UsbContext *ctx) {
     memset(ctx, 0, sizeof(UsbContext));
+    atomic_init(&ctx->connected, false);
 
     int result = libusb_init(&ctx->ctx);
     if (result < 0) {
@@ -196,7 +197,16 @@ int usb_send_ack(UsbContext *ctx, uint8_t sequence, bool verbose) {
     if (result == 0 && verbose) {
         LOG_DEBUG("Sent ACK (seq=%d)", sequence);
     }
-    return (result == 0) ? 0 : -1;
+    return result == 0 && transferred == (int)sizeof(ack_packet) ? 0 : -1;
+}
+
+int usb_ack_guide_button(UsbContext *ctx, uint8_t sequence) {
+    uint8_t packet[] = {
+        GIP_CMD_ACKNOWLEDGE, 0x20, sequence, 0x09,
+        0x00, GIP_CMD_GUIDE_BUTTON, 0x20, 0x02,
+        0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    return usb_write_packet(ctx, packet, sizeof(packet));
 }
 
 int usb_initialize_controller(UsbContext *ctx, bool verbose) {
@@ -249,9 +259,8 @@ int usb_initialize_controller(UsbContext *ctx, bool verbose) {
         {auth_done, (int)sizeof(auth_done), "AUTH DONE"},
     };
 
-    uint8_t serial = 0;
     for (size_t i = 0; i < sizeof(init_seq) / sizeof(init_seq[0]); i++) {
-        init_seq[i].pkt[2] = serial++;   /* fill in sequence number */
+        init_seq[i].pkt[2] = ctx->sequence++;
         result = libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint,
                                             init_seq[i].pkt, init_seq[i].len,
                                             &transferred, USB_ACK_TIMEOUT_MS);
@@ -261,7 +270,7 @@ int usb_initialize_controller(UsbContext *ctx, bool verbose) {
             return -1;
         }
         if (verbose) {
-            LOG_INFO("Sent %s (seq=%d)", init_seq[i].name, serial - 1);
+            LOG_INFO("Sent %s (seq=%d)", init_seq[i].name, init_seq[i].pkt[2]);
         }
         usleep(50000);
     }
@@ -277,8 +286,9 @@ int usb_read_packet(UsbContext *ctx, uint8_t *buffer, int size, int *transferred
 
 int usb_write_packet(UsbContext *ctx, uint8_t *buffer, int size) {
     int transferred;
-    return libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint, buffer,
-                                      size, &transferred, USB_ACK_TIMEOUT_MS);
+    int result = libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint, buffer,
+                                            size, &transferred, USB_OUTPUT_TIMEOUT_MS);
+    return result == 0 && transferred == size ? 0 : (result == 0 ? LIBUSB_ERROR_IO : result);
 }
 
 /*******************************************************************************
@@ -289,14 +299,15 @@ int usb_rumble_pulse(UsbContext *ctx, uint8_t intensity, uint16_t duration_ms) {
         .header = {
             .command = GIP_CMD_RUMBLE,
             .options = 0x00,
-            .sequence = 0x00,
+            .sequence = ctx->sequence++,
             .length = sizeof(GipRumblePacket) - sizeof(GipHeader)
         },
+        .reserved = 0,
         .enable = 0x03,  // Enable both motors
-        .magnitude_left = intensity,
-        .magnitude_right = intensity,
         .magnitude_trigger_left = 0,
         .magnitude_trigger_right = 0,
+        .magnitude_left = intensity,
+        .magnitude_right = intensity,
         .duration = (uint8_t)(duration_ms / 10),
         .delay = 0,
         .repeat = 0

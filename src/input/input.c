@@ -11,19 +11,9 @@
 /*******************************************************************************
  * Lookup Tables for Optimization (Phase 4)
  ******************************************************************************/
-static float SQRT_LUT[1025];      // Pre-computed sqrt for magnitude 0-32767
 static float POW_LUT[257];        // Pre-computed pow for curve 1.8
 static bool lut_initialized = false;
 static float cached_curve = 0.0f;
-
-static void init_sqrt_lut(void) {
-    // Magnitude ranges from 0 to ~46340 (sqrt(32767^2 + 32767^2))
-    // We'll use 1024 buckets, each covering ~45 units
-    for (int i = 0; i <= 1024; i++) {
-        float magnitude = (float)i * 45.0f;
-        SQRT_LUT[i] = sqrtf(magnitude);
-    }
-}
 
 static void init_pow_lut(float curve) {
     // Normalized values from 0.0 to 1.0 (256 steps)
@@ -32,14 +22,6 @@ static void init_pow_lut(float curve) {
         float norm = (float)i / 256.0f;
         POW_LUT[i] = powf(norm, curve);
     }
-}
-
-static float fast_sqrt(float magnitude_squared) {
-    // Use LUT for approximate sqrt
-    int idx = (int)(magnitude_squared / (45.0f * 45.0f));
-    if (idx > 1024) idx = 1024;
-    if (idx < 0) idx = 0;
-    return SQRT_LUT[idx];
 }
 
 static float fast_pow(float norm, float curve) {
@@ -56,7 +38,6 @@ static float fast_pow(float norm, float curve) {
 
 static void ensure_lut_initialized(float curve) {
     if (!lut_initialized) {
-        init_sqrt_lut();
         init_pow_lut(curve);
         lut_initialized = true;
     }
@@ -65,12 +46,55 @@ static void ensure_lut_initialized(float curve) {
 /*******************************************************************************
  * Button mask to index mapping
  ******************************************************************************/
-static const uint16_t button_masks[XBOX_BTN_COUNT] = {
-    XBOX_BTN_A, XBOX_BTN_B, XBOX_BTN_X, XBOX_BTN_Y,
-    XBOX_BTN_LB, XBOX_BTN_RB, XBOX_BTN_LS, XBOX_BTN_RS,
-    XBOX_BTN_VIEW, XBOX_BTN_MENU,
-    XBOX_BTN_DPAD_UP, XBOX_BTN_DPAD_DOWN, XBOX_BTN_DPAD_LEFT, XBOX_BTN_DPAD_RIGHT
-};
+#define LEFT_TRIGGER_SOURCE 14
+#define RIGHT_TRIGGER_SOURCE 15
+#define LEFT_STICK_SOURCE 16
+#define RIGHT_STICK_SOURCE 20
+
+static int mouse_binding(uint16_t binding) {
+    if (binding == 0xFFFE) return MOUSE_BUTTON_LEFT;
+    if (binding == 0xFFFD) return MOUSE_BUTTON_RIGHT;
+    if (binding == 0xFFFC) return MOUSE_BUTTON_CENTER;
+    return -1;
+}
+
+static void change_binding_ref(InputState *state, uint16_t binding, bool pressed) {
+    int mouse = mouse_binding(binding);
+    if (mouse >= 0) {
+        uint8_t *refs = &state->mouse_refs[mouse];
+        if (pressed) {
+            if ((*refs)++ == 0) send_mouse_button_event(mouse, true);
+        } else if (*refs && --(*refs) == 0) {
+            send_mouse_button_event(mouse, false);
+        }
+        state->mouse_left = state->mouse_refs[MOUSE_BUTTON_LEFT] != 0;
+        state->mouse_right = state->mouse_refs[MOUSE_BUTTON_RIGHT] != 0;
+        state->mouse_middle = state->mouse_refs[MOUSE_BUTTON_CENTER] != 0;
+    } else if (binding < 256) {
+        uint8_t *refs = &state->key_refs[binding];
+        if (pressed) {
+            if ((*refs)++ == 0) send_key_event(binding, true);
+        } else if (*refs && --(*refs) == 0) {
+            send_key_event(binding, false);
+        }
+        state->keys[binding] = *refs != 0;
+    }
+}
+
+static void set_source(InputState *state, int source, uint16_t binding, bool pressed) {
+    if (state->source_pressed[source] == pressed &&
+        (!pressed || state->source_binding[source] == binding)) return;
+
+    if (state->source_pressed[source])
+        change_binding_ref(state, state->source_binding[source], false);
+    state->source_binding[source] = binding;
+    state->source_pressed[source] = pressed;
+    if (pressed) change_binding_ref(state, binding, true);
+}
+
+static void clear_stick_sources(InputState *state, int base) {
+    for (int i = 0; i < 4; i++) set_source(state, base + i, 0xFFFF, false);
+}
 
 /*******************************************************************************
  * State Management
@@ -96,6 +120,7 @@ void input_state_release_all(InputState *state) {
     if (state->mouse_middle) {
         send_mouse_button_event(MOUSE_BUTTON_CENTER, false);
     }
+    memset(state, 0, sizeof(*state));
 }
 
 /*******************************************************************************
@@ -145,13 +170,6 @@ void process_buttons(uint16_t buttons, InputState *state, const ControllerMappin
         bool was_pressed = (state->prev_buttons & button_map[i].mask) != 0;
 
         if (is_pressed != was_pressed) {
-            // Check for turbo mode
-            if (config->features.turbo.enabled && state->turbo_enabled[i] && is_pressed) {
-                // Turbo is handled in turbo processing
-            } else {
-                send_key_event(button_map[i].keycode, is_pressed);
-            }
-
             // Rumble feedback on button press
             if (is_pressed && config->features.rumble.enabled &&
                 config->features.rumble.button_feedback && rumble_callback) {
@@ -159,15 +177,17 @@ void process_buttons(uint16_t buttons, InputState *state, const ControllerMappin
             }
         }
 
-        // Handle turbo mode
-        if (config->features.turbo.enabled && state->turbo_enabled[i] && is_pressed) {
+        bool turbo = config->features.turbo.enabled && state->turbo_enabled[i];
+        if (turbo && is_pressed) {
+            set_source(state, i, button_map[i].keycode, false);
             state->turbo_counter[i]++;
-            if (state->turbo_counter[i] >= config->features.turbo.rate) {
-                send_key_event(button_map[i].keycode, true);
-                send_key_event(button_map[i].keycode, false);
+            if (config->features.turbo.rate && state->turbo_counter[i] >= config->features.turbo.rate) {
+                set_source(state, i, button_map[i].keycode, true);
+                set_source(state, i, button_map[i].keycode, false);
                 state->turbo_counter[i] = 0;
             }
         } else {
+            set_source(state, i, button_map[i].keycode, is_pressed);
             state->turbo_counter[i] = 0;
         }
     }
@@ -178,38 +198,21 @@ void process_buttons(uint16_t buttons, InputState *state, const ControllerMappin
 /*******************************************************************************
  * Trigger Processing
  ******************************************************************************/
-void process_triggers(uint8_t left_trigger, uint8_t right_trigger,
+void process_triggers(uint16_t left_trigger, uint16_t right_trigger,
                       InputState *state, const ControllerMapping *config) {
-    // Right trigger (swapped - GIP packet has them reversed)
-    bool right_pressed = left_trigger > config->triggers.threshold;
-    bool right_was_pressed = state->prev_right_trigger > config->triggers.threshold;
-
-    if (right_pressed != right_was_pressed) {
-        if (config->triggers.right_trigger_mode == TRIGGER_MODE_MOUSE) {
-            send_mouse_button_event(MOUSE_BUTTON_RIGHT, right_pressed);
-            state->mouse_right = right_pressed;
-        } else if (config->triggers.right_trigger_mode == TRIGGER_MODE_KEY) {
-            send_key_event(config->triggers.right_trigger_key, right_pressed);
-            state->keys[config->triggers.right_trigger_key] = right_pressed;
-        }
-    }
-
-    // Left trigger (swapped - GIP packet has them reversed)
-    bool left_pressed = right_trigger > config->triggers.threshold;
-    bool left_was_pressed = state->prev_left_trigger > config->triggers.threshold;
-
-    if (left_pressed != left_was_pressed) {
-        if (config->triggers.left_trigger_mode == TRIGGER_MODE_MOUSE) {
-            send_mouse_button_event(MOUSE_BUTTON_LEFT, left_pressed);
-            state->mouse_left = left_pressed;
-        } else if (config->triggers.left_trigger_mode == TRIGGER_MODE_KEY) {
-            send_key_event(config->triggers.left_trigger_key, left_pressed);
-            state->keys[config->triggers.left_trigger_key] = left_pressed;
-        }
-    }
-
-    state->prev_left_trigger = right_trigger;  // Swapped
-    state->prev_right_trigger = left_trigger;  // Swapped
+    // GIP reports 10-bit pressure. Keep the existing 0-255 config threshold scale.
+    bool left_pressed = (left_trigger > 1023 ? 255 : left_trigger >> 2) > config->triggers.threshold;
+    bool right_pressed = (right_trigger > 1023 ? 255 : right_trigger >> 2) > config->triggers.threshold;
+    uint16_t left_binding = config->triggers.left_trigger_mode == TRIGGER_MODE_MOUSE
+                            ? 0xFFFE : config->triggers.left_trigger_key;
+    uint16_t right_binding = config->triggers.right_trigger_mode == TRIGGER_MODE_MOUSE
+                             ? 0xFFFD : config->triggers.right_trigger_key;
+    set_source(state, LEFT_TRIGGER_SOURCE, left_binding,
+               left_pressed && config->triggers.left_trigger_mode != TRIGGER_MODE_DISABLED);
+    set_source(state, RIGHT_TRIGGER_SOURCE, right_binding,
+               right_pressed && config->triggers.right_trigger_mode != TRIGGER_MODE_DISABLED);
+    state->prev_left_trigger = left_trigger;
+    state->prev_right_trigger = right_trigger;
 }
 
 /*******************************************************************************
@@ -218,39 +221,23 @@ void process_triggers(uint8_t left_trigger, uint8_t right_trigger,
 void process_stick_as_keys(int16_t x, int16_t y,
                            uint16_t key_up, uint16_t key_down,
                            uint16_t key_left, uint16_t key_right,
-                           InputState *state) {
-    // Axes are swapped in the controller - swap them back
-    int16_t temp = x;
-    x = y;
-    y = temp;
+                           InputState *state, int source_base) {
 
     // Normalize to -1.0 to 1.0
     float norm_x = x / (float)STICK_MAX;
     float norm_y = y / (float)STICK_MAX;
 
     // Determine which directions are active (with threshold)
-    bool up = (norm_y > 0.3f);
-    bool down = (norm_y < -0.3f);
+    bool up = (norm_y < -0.3f);
+    bool down = (norm_y > 0.3f);
     bool left = (norm_x < -0.3f);
     bool right = (norm_x > 0.3f);
 
     // Send key events for state changes
-    if (up != state->keys[key_up]) {
-        send_key_event(key_up, up);
-        state->keys[key_up] = up;
-    }
-    if (down != state->keys[key_down]) {
-        send_key_event(key_down, down);
-        state->keys[key_down] = down;
-    }
-    if (left != state->keys[key_left]) {
-        send_key_event(key_left, left);
-        state->keys[key_left] = left;
-    }
-    if (right != state->keys[key_right]) {
-        send_key_event(key_right, right);
-        state->keys[key_right] = right;
-    }
+    set_source(state, source_base, key_up, up);
+    set_source(state, source_base + 1, key_down, down);
+    set_source(state, source_base + 2, key_left, left);
+    set_source(state, source_base + 3, key_right, right);
 }
 
 /*******************************************************************************
@@ -262,14 +249,9 @@ void process_stick_as_mouse(int16_t x, int16_t y,
                             const ControllerMapping *config) {
     ensure_lut_initialized(config->sticks.mouse_curve);
 
-    // Axes are swapped in the controller - swap them back
-    int16_t temp = x;
-    x = y;
-    y = temp;
-
     // Normalize to -1.0 to 1.0
     float target_x = x / (float)STICK_MAX;
-    float target_y = -y / (float)STICK_MAX;  // Invert Y
+    float target_y = y / (float)STICK_MAX;  // CoreGraphics screen Y grows downward
 
     // Exponential smoothing
     float alpha = 1.0f - config->sticks.mouse_smoothing;
@@ -302,6 +284,7 @@ void process_sticks(int16_t left_x, int16_t left_y,
                     int16_t right_x, int16_t right_y,
                     InputState *state, const ControllerMapping *config,
                     bool streaming_mode) {
+    (void)streaming_mode;
     // Apply deadzones and cache results
     apply_deadzone(&left_x, &left_y, config->sticks.deadzone);
     apply_deadzone(&right_x, &right_y, config->sticks.deadzone);
@@ -318,20 +301,18 @@ void process_sticks(int16_t left_x, int16_t left_y,
             process_stick_as_keys(left_x, left_y,
                                   config->sticks.left_up, config->sticks.left_down,
                                   config->sticks.left_left, config->sticks.left_right,
-                                  state);
+                                  state, LEFT_STICK_SOURCE);
             break;
         case STICK_MODE_ARROWS:
-            process_stick_as_keys(left_x, left_y, 0x7E, 0x7D, 0x7B, 0x7C, state);
+            process_stick_as_keys(left_x, left_y, 0x7E, 0x7D, 0x7B, 0x7C,
+                                  state, LEFT_STICK_SOURCE);
             break;
         case STICK_MODE_MOUSE:
-            process_stick_as_mouse(left_x, left_y,
-                                   &state->smoothed_left_x,
-                                   &state->smoothed_left_y,
-                                   &state->mouse_dx, &state->mouse_dy,
-                                   config);
+            clear_stick_sources(state, LEFT_STICK_SOURCE);
             break;
         case STICK_MODE_DISABLED:
         default:
+            clear_stick_sources(state, LEFT_STICK_SOURCE);
             break;
     }
 
@@ -339,33 +320,24 @@ void process_sticks(int16_t left_x, int16_t left_y,
     switch (config->sticks.right_stick_mode) {
         case STICK_MODE_WASD:
             process_stick_as_keys(right_x, right_y,
-                                  config->sticks.left_up, config->sticks.left_down,
-                                  config->sticks.left_left, config->sticks.left_right,
-                                  state);
+                                  config->sticks.right_up, config->sticks.right_down,
+                                  config->sticks.right_left, config->sticks.right_right,
+                                  state, RIGHT_STICK_SOURCE);
             break;
         case STICK_MODE_ARROWS:
-            process_stick_as_keys(right_x, right_y, 0x7E, 0x7D, 0x7B, 0x7C, state);
+            process_stick_as_keys(right_x, right_y, 0x7E, 0x7D, 0x7B, 0x7C,
+                                  state, RIGHT_STICK_SOURCE);
             break;
         case STICK_MODE_MOUSE:
-            process_stick_as_mouse(right_x, right_y,
-                                   &state->smoothed_right_x,
-                                   &state->smoothed_right_y,
-                                   &state->mouse_dx, &state->mouse_dy,
-                                   config);
+            clear_stick_sources(state, RIGHT_STICK_SOURCE);
             break;
         case STICK_MODE_DISABLED:
         default:
+            clear_stick_sources(state, RIGHT_STICK_SOURCE);
             break;
     }
 
-    // Send accumulated mouse movement
-    if (state->mouse_dx != 0.0f || state->mouse_dy != 0.0f) {
-        send_mouse_movement(state->mouse_dx, state->mouse_dy, streaming_mode);
-        state->mouse_dx = 0.0f;
-        state->mouse_dy = 0.0f;
-    }
-
-    // Store current positions
+    // Mouse movement is generated at a fixed rate by the driver loop.
     state->current_left_stick_x = left_x;
     state->current_left_stick_y = left_y;
     state->current_right_stick_x = right_x;
@@ -377,13 +349,11 @@ void process_sticks(int16_t left_x, int16_t left_y,
  ******************************************************************************/
 void generate_continuous_movement(InputState *state, const ControllerMapping *config,
                                   bool streaming_mode) {
-    // Use cached post-deadzone values to avoid recomputation
     int16_t left_x = state->dz_left_stick_x;
     int16_t left_y = state->dz_left_stick_y;
     int16_t right_x = state->dz_right_stick_x;
     int16_t right_y = state->dz_right_stick_y;
 
-    // Generate mouse movement if sticks are in mouse mode
     if (config->sticks.left_stick_mode == STICK_MODE_MOUSE) {
         process_stick_as_mouse(left_x, left_y,
                                &state->smoothed_left_x,
@@ -402,7 +372,8 @@ void generate_continuous_movement(InputState *state, const ControllerMapping *co
 
     // Send accumulated mouse movement
     if (state->mouse_dx != 0.0f || state->mouse_dy != 0.0f) {
-        send_mouse_movement(state->mouse_dx, state->mouse_dy, streaming_mode);
+        send_mouse_movement(state->mouse_dx, state->mouse_dy, streaming_mode,
+                            state->mouse_left, state->mouse_right, state->mouse_middle);
         state->mouse_dx = 0.0f;
         state->mouse_dy = 0.0f;
     }

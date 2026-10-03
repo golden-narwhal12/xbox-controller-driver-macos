@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 /*******************************************************************************
  * Stick Mode Enum
@@ -68,6 +69,7 @@ typedef enum {
 #define USB_TIMEOUT_MS         10
 #define USB_INIT_TIMEOUT_MS    2000
 #define USB_ACK_TIMEOUT_MS     1000
+#define USB_OUTPUT_TIMEOUT_MS  100
 
 /*******************************************************************************
  * Input Constants
@@ -184,8 +186,8 @@ typedef struct {
     bool mouse_middle;
 
     uint16_t prev_buttons;
-    uint8_t prev_left_trigger;
-    uint8_t prev_right_trigger;
+    uint16_t prev_left_trigger;
+    uint16_t prev_right_trigger;
     int16_t prev_left_stick_x;
     int16_t prev_left_stick_y;
     int16_t prev_right_stick_x;
@@ -213,6 +215,12 @@ typedef struct {
     // Turbo state
     bool turbo_enabled[XBOX_BTN_COUNT];
     uint8_t turbo_counter[XBOX_BTN_COUNT];
+
+    // One physical control owns each source; shared keys/buttons stay held.
+    uint16_t source_binding[24];
+    bool source_pressed[24];
+    uint8_t key_refs[256];
+    uint8_t mouse_refs[3];
 } InputState;
 
 /*******************************************************************************
@@ -227,7 +235,8 @@ typedef struct {
     libusb_device_handle *handle;
     uint8_t in_endpoint;
     uint8_t out_endpoint;
-    bool connected;
+    uint8_t sequence;
+    atomic_bool connected;
     int reconnect_attempts;
 
     // Async transfer (Phase 3)

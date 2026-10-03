@@ -5,6 +5,7 @@
 #include "../../include/driver.h"
 #include "../../include/config.h"
 #include "../../include/input.h"
+#include "../../include/event.h"
 #include "../../include/log.h"
 #include "../../include/thread.h"
 #include <stdio.h>
@@ -17,6 +18,7 @@
  * Global State
  ******************************************************************************/
 static AtomicBool g_running;
+static AtomicBool g_reload_requested;
 static Mutex g_state_mutex;
 static RWLock g_config_lock;
 
@@ -26,9 +28,7 @@ static RWLock g_config_lock;
 static void rumble_callback(void *ctx) {
     DriverContext *driver = (DriverContext *)ctx;
     if (driver->config.features.rumble.enabled && driver->config.features.rumble.button_feedback) {
-        usb_rumble_pulse(&driver->usb,
-                         driver->config.features.rumble.intensity,
-                         driver->config.features.rumble.duration_ms);
+        driver->rumble_pending = true;
     }
 }
 
@@ -38,11 +38,14 @@ static void rumble_callback(void *ctx) {
 static void signal_handler(int sig) {
     (void)sig;
     driver_request_stop();
-    printf("\nShutting down...\n");
 }
 
 void driver_request_stop(void) {
     atomic_bool_set(&g_running, false);
+}
+
+void driver_request_reload(void) {
+    atomic_bool_set(&g_reload_requested, true);
 }
 
 bool driver_should_stop(void) {
@@ -53,8 +56,10 @@ bool driver_should_stop(void) {
  * Driver Initialization
  ******************************************************************************/
 int driver_init(DriverContext *ctx, const char *config_path) {
+    memset(ctx, 0, sizeof(*ctx));
     // Initialize globals
     atomic_bool_init(&g_running, true);
+    atomic_bool_init(&g_reload_requested, false);
     mutex_init(&g_state_mutex);
     rwlock_init(&g_config_lock);
 
@@ -70,13 +75,17 @@ int driver_init(DriverContext *ctx, const char *config_path) {
 
     // Load configuration
     char loaded_path[512];
-    config_load_auto(config_path, &ctx->config, loaded_path, sizeof(loaded_path));
-    strncpy(ctx->config_path, loaded_path, sizeof(ctx->config_path));
+    if (config_load_auto(config_path, &ctx->config, loaded_path, sizeof(loaded_path)) != 0) {
+        mutex_destroy(&g_state_mutex);
+        rwlock_destroy(&g_config_lock);
+        return -1;
+    }
+    snprintf(ctx->config_path, sizeof(ctx->config_path), "%s", loaded_path);
 
     // Get initial modification time for hot-reload
     struct stat st;
     if (stat(ctx->config_path, &st) == 0) {
-        ctx->config_last_modified = st.st_mtime;
+        ctx->config_last_modified = st.st_mtimespec;
     }
 
     // Initialize logging based on config
@@ -93,6 +102,9 @@ int driver_init(DriverContext *ctx, const char *config_path) {
 
     // Initialize USB
     if (usb_init(&ctx->usb) != 0) {
+        log_cleanup();
+        mutex_destroy(&g_state_mutex);
+        rwlock_destroy(&g_config_lock);
         return -1;
     }
 
@@ -104,6 +116,7 @@ void driver_cleanup(DriverContext *ctx) {
 
     // Release all held keys/buttons
     input_state_release_all(&ctx->input_state);
+    event_cleanup();
 
     // Close USB
     usb_cleanup(&ctx->usb);
@@ -121,12 +134,19 @@ void driver_cleanup(DriverContext *ctx) {
 /*******************************************************************************
  * Input Loop
  ******************************************************************************/
-void driver_input_loop(DriverContext *ctx) {
+static uint64_t monotonic_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+int driver_input_loop(DriverContext *ctx) {
     uint8_t buffer[USB_BUFFER_SIZE];
     int transferred;
     int result;
     int input_count = 0;
-    int hot_reload_counter = 0;
+    uint64_t last_motion = monotonic_ms();
+    uint64_t last_reload = last_motion;
 
     printf("=== Xbox Controller Simulator Active ===\n");
     printf("Controller input is now being translated to keyboard/mouse\n");
@@ -145,7 +165,9 @@ void driver_input_loop(DriverContext *ctx) {
 
             if (header->command == GIP_CMD_INPUT &&
                 transferred >= (int)sizeof(GipInputPacket)) {
-                GipInputPacket *input = (GipInputPacket *)buffer;
+                GipInputPacket packet;
+                memcpy(&packet, buffer, sizeof(packet));
+                GipInputPacket *input = &packet;
                 input_count++;
 
                 // Lock state for writing
@@ -163,8 +185,16 @@ void driver_input_loop(DriverContext *ctx) {
                               input->right_stick_x, input->right_stick_y,
                               &ctx->input_state, &ctx->config, ctx->config.streaming_mode);
 
+                bool rumble_pending = ctx->rumble_pending;
+                ctx->rumble_pending = false;
+                uint8_t rumble_intensity = ctx->config.features.rumble.intensity;
+                uint16_t rumble_duration = ctx->config.features.rumble.duration_ms;
+
                 rwlock_read_unlock(&g_config_lock);
                 mutex_unlock(&g_state_mutex);
+
+                if (rumble_pending)
+                    usb_rumble_pulse(&ctx->usb, rumble_intensity, rumble_duration);
 
                 // Console output (if enabled)
                 if (ctx->verbose) {
@@ -185,20 +215,17 @@ void driver_input_loop(DriverContext *ctx) {
                     fflush(stdout);
                 }
 
-            } else if (header->command == GIP_CMD_GUIDE_BUTTON && ctx->verbose) {
-                printf("\n[GUIDE] Guide button pressed\n");
+            } else if (header->command == GIP_CMD_GUIDE_BUTTON) {
+                if (header->options == 0x30) usb_ack_guide_button(&ctx->usb, header->sequence);
+                if (ctx->verbose) printf("\n[GUIDE] Guide button pressed\n");
             }
-
-        } else if (result == LIBUSB_ERROR_TIMEOUT) {
-            // Timeout: Generate continuous movement from held stick positions
-            mutex_lock(&g_state_mutex);
-            rwlock_read_lock(&g_config_lock);
-            generate_continuous_movement(&ctx->input_state, &ctx->config, ctx->config.streaming_mode);
-            rwlock_read_unlock(&g_config_lock);
-            mutex_unlock(&g_state_mutex);
 
         } else if (result == LIBUSB_ERROR_NO_DEVICE) {
             LOG_WARN("Controller disconnected!");
+
+            mutex_lock(&g_state_mutex);
+            input_state_release_all(&ctx->input_state);
+            mutex_unlock(&g_state_mutex);
 
             // Attempt reconnection
             usb_close_device(&ctx->usb);
@@ -220,26 +247,43 @@ void driver_input_loop(DriverContext *ctx) {
 
             if (!ctx->usb.connected) {
                 LOG_ERROR("Failed to reconnect after %d attempts", MAX_RECONNECT_ATTEMPTS);
-                break;
+                return -1;
             }
         }
 
-        // Check for config hot-reload every ~1 second (100 iterations at 10ms)
-        if (++hot_reload_counter >= 100) {
-            hot_reload_counter = 0;
+        uint64_t now = monotonic_ms();
+        if (now - last_motion >= 10) {
+            last_motion = now;
+            mutex_lock(&g_state_mutex);
+            rwlock_read_lock(&g_config_lock);
+            generate_continuous_movement(&ctx->input_state, &ctx->config, ctx->config.streaming_mode);
+            rwlock_read_unlock(&g_config_lock);
+            mutex_unlock(&g_state_mutex);
+        }
 
+        bool force_reload = atomic_exchange(&g_reload_requested.value, false);
+        if (force_reload || now - last_reload >= 1000) {
+            last_reload = now;
+            mutex_lock(&g_state_mutex);
             rwlock_write_lock(&g_config_lock);
+            struct timespec previous_modified = ctx->config_last_modified;
+            if (force_reload) ctx->config_last_modified = (struct timespec){0};
             int reload_result = config_reload_if_changed(ctx->config_path, &ctx->config,
                                                           &ctx->config_last_modified);
             if (reload_result == 1) {
+                input_state_release_all(&ctx->input_state);
                 ctx->verbose = ctx->config.console_output_enabled;
                 log_set_level(ctx->config.log_level);
+            } else if (force_reload) {
+                ctx->config_last_modified = previous_modified;
             }
             rwlock_write_unlock(&g_config_lock);
+            mutex_unlock(&g_state_mutex);
         }
     }
 
     printf("\n\n");
+    return 0;
 }
 
 /*******************************************************************************
@@ -259,7 +303,5 @@ int driver_run(DriverContext *ctx) {
     }
 
     // Run input loop
-    driver_input_loop(ctx);
-
-    return 0;
+    return driver_input_loop(ctx);
 }

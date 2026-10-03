@@ -5,6 +5,9 @@
 #include "test_framework.h"
 #include "../include/types.h"
 #include "../include/config.h"
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 /*******************************************************************************
  * Default Configuration Tests
@@ -116,6 +119,43 @@ TEST(config_key_name) {
     TEST_PASS();
 }
 
+TEST(config_scoped_keys_and_failed_reload) {
+    char path[] = "/tmp/xbox-config-test-XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    const char *valid = "{\"buttons\":{\"dpad_up\":\"f1\"},"
+                        "\"left_stick\":{\"deadzone\":9000},"
+                        "\"right_stick\":{\"mode\":\"arrows\",\"up\":\"i\"}}";
+    ASSERT_EQ(write(fd, valid, strlen(valid)), (ssize_t)strlen(valid));
+    close(fd);
+
+    ControllerMapping mapping;
+    ASSERT_EQ(config_load(path, &mapping), 0);
+    ASSERT_EQ(mapping.sticks.left_stick_mode, STICK_MODE_WASD);
+    ASSERT_EQ(mapping.sticks.right_stick_mode, STICK_MODE_ARROWS);
+    ASSERT_EQ(mapping.sticks.right_up, config_parse_key("i"));
+    ASSERT_EQ(mapping.buttons.key_dpad_up, config_parse_key("f1"));
+
+    fd = open(path, O_WRONLY | O_TRUNC);
+    ASSERT(fd >= 0);
+    const char *invalid = "{\"buttons\": {\"a\": \"space\"";
+    ASSERT_EQ(write(fd, invalid, strlen(invalid)), (ssize_t)strlen(invalid));
+    close(fd);
+    struct timespec old = {0};
+    ASSERT_EQ(config_reload_if_changed(path, &mapping, &old), -1);
+    ASSERT_EQ(mapping.sticks.right_stick_mode, STICK_MODE_ARROWS);
+    ASSERT_EQ(old.tv_sec, 0);
+    unlink(path);
+    TEST_PASS();
+}
+
+TEST(explicit_missing_config_is_an_error) {
+    ControllerMapping mapping;
+    ASSERT_EQ(config_load_auto("/tmp/xbox-controller-does-not-exist.json",
+                               &mapping, NULL, 0), -1);
+    TEST_PASS();
+}
+
 /*******************************************************************************
  * Main
  ******************************************************************************/
@@ -138,6 +178,8 @@ int main(void) {
 
     printf("\n-- Key Name Tests --\n");
     RUN_TEST(config_key_name);
+    RUN_TEST(config_scoped_keys_and_failed_reload);
+    RUN_TEST(explicit_missing_config_is_an_error);
 
     TEST_SUMMARY();
     return TEST_EXIT_CODE();

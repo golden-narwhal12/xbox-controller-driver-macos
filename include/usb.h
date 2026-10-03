@@ -38,23 +38,22 @@ typedef struct {
 typedef struct {
     GipHeader header;
     uint16_t buttons;
-    uint8_t left_trigger;
-    uint8_t padding1;
-    uint8_t right_trigger;
-    uint8_t padding2;
-    int16_t left_stick_y;
+    uint16_t left_trigger;
+    uint16_t right_trigger;
     int16_t left_stick_x;
-    int16_t right_stick_y;
+    int16_t left_stick_y;
     int16_t right_stick_x;
+    int16_t right_stick_y;
 } GipInputPacket;
 
 typedef struct {
     GipHeader header;
+    uint8_t reserved;
     uint8_t enable;
-    uint8_t magnitude_left;
-    uint8_t magnitude_right;
     uint8_t magnitude_trigger_left;
     uint8_t magnitude_trigger_right;
+    uint8_t magnitude_left;
+    uint8_t magnitude_right;
     uint8_t duration;
     uint8_t delay;
     uint8_t repeat;
@@ -74,6 +73,7 @@ void usb_close_device(UsbContext *ctx);
  * USB Communication
  ******************************************************************************/
 int usb_send_ack(UsbContext *ctx, uint8_t sequence, bool verbose);
+int usb_ack_guide_button(UsbContext *ctx, uint8_t sequence);
 int usb_initialize_controller(UsbContext *ctx, bool verbose);
 int usb_read_packet(UsbContext *ctx, uint8_t *buffer, int size, int *transferred, int timeout_ms);
 int usb_write_packet(UsbContext *ctx, uint8_t *buffer, int size);

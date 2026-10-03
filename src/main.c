@@ -15,8 +15,9 @@ static void print_usage(const char *program) {
     printf("Configuration file search order:\n");
     printf("  1. --config argument\n");
     printf("  2. ./controller.json\n");
-    printf("  3. ~/.config/xbox-controller/config.json\n");
-    printf("  4. Built-in defaults\n");
+    printf("  3. ./config/controller.json\n");
+    printf("  4. ~/.config/xbox-controller/config.json\n");
+    printf("  5. Built-in defaults\n");
 }
 
 int main(int argc, char *argv[]) {
