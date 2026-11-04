@@ -1,5 +1,7 @@
 # Xbox One Controller Driver for macOS
 
+![Downloads](https://img.shields.io/github/downloads/golden-narwhal12/xbox-controller-driver-macos/total)
+
 A userspace driver that translates Xbox One controller input to keyboard and mouse events. Works system-wide in any application.
 
 ## Features
@@ -40,6 +42,19 @@ can test -- some models need extra init packets). Confirmed working:
 
 ## Installation
 
+### Prebuilt binary
+
+Download the latest `xbox-controller-macos-arm64.zip` from the [Releases page](https://github.com/golden-narwhal12/xbox-controller-driver-macos/releases/latest) (Apple Silicon), then:
+
+```bash
+brew install libusb
+unzip xbox-controller-macos-arm64.zip && cd xbox-controller-macos-arm64
+xattr -d com.apple.quarantine simulator simulator-cli   # binaries are unsigned
+sudo ./simulator
+```
+
+### Build from source
+
 ```bash
 brew install libusb pkg-config
 make simulator
@@ -73,6 +88,7 @@ Buttons (including `dpad_up`, `dpad_down`, `dpad_left`, and `dpad_right`) can ma
 make simulator       # GUI version with menu bar (recommended)
 make simulator-cli   # CLI-only version
 make test            # Run unit tests
+make dist            # Package a release zip in dist/
 make clean           # Remove build artifacts
 ```
 

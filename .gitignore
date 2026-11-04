@@ -39,3 +39,6 @@ DerivedData/
 
 # User config (keep the template in config/)
 ~/.config/xbox-controller/
+
+# Release packages
+dist/

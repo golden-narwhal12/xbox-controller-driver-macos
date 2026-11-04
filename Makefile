@@ -137,9 +137,21 @@ test-lut: tests/test_lut.c | build
 	@echo "Running LUT tests..."
 	@./build/test_lut
 
+# Release package (zip of binaries + default config), for GitHub Releases
+ARCH = $(shell uname -m)
+DIST_NAME = xbox-controller-macos-$(ARCH)
+
+dist: simulator simulator-cli
+	rm -rf dist/$(DIST_NAME)
+	mkdir -p dist/$(DIST_NAME)
+	cp simulator simulator-cli README.md LICENSE dist/$(DIST_NAME)/
+	cp config/controller.json dist/$(DIST_NAME)/controller.json
+	cd dist && zip -qr $(DIST_NAME).zip $(DIST_NAME)
+	@echo "Created dist/$(DIST_NAME).zip"
+
 # Clean
 clean:
-	rm -rf build
+	rm -rf build dist
 	rm -f xbox_usb_test xbox_gip_test simulator simulator-cli simulator-legacy
 	@echo "Cleaned up build artifacts"
 
@@ -190,6 +202,6 @@ help:
 	@echo ""
 	@echo "Note: Requires accessibility permissions for keyboard/mouse input"
 
-.PHONY: all clean deps help test test-input test-input-runtime test-config test-lut install-config
+.PHONY: all dist clean deps help test test-input test-input-runtime test-config test-lut install-config
 
 -include $(wildcard build/*.d)
