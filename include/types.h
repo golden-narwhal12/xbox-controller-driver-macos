@@ -62,6 +62,18 @@ typedef enum {
 #define XBOX_BTN_COUNT         14
 
 /*******************************************************************************
+ * Input Sources: every physical control that can hold a binding
+ ******************************************************************************/
+enum {
+    SOURCE_FIRST_BUTTON  = 0,                       // button i is source i
+    SOURCE_LEFT_TRIGGER  = XBOX_BTN_COUNT,
+    SOURCE_RIGHT_TRIGGER,
+    SOURCE_LEFT_STICK,                              // up, down, left, right
+    SOURCE_RIGHT_STICK   = SOURCE_LEFT_STICK + 4,   // up, down, left, right
+    SOURCE_COUNT         = SOURCE_RIGHT_STICK + 4
+};
+
+/*******************************************************************************
  * USB Constants
  ******************************************************************************/
 /* Supported controllers are listed in SUPPORTED_DEVICES[] (src/usb/usb.c) */
@@ -88,10 +100,15 @@ typedef enum {
  ******************************************************************************/
 #define MOTION_TICK_MS         10.0f   // Nominal mouse-motion tick; gains are per tick
 #define MOTION_MAX_DT_MS       50.0f   // Longest elapsed time applied in one tick
+#define MOUSE_PX_PER_TICK      15.0f   // Cursor pixels per nominal tick at full tilt,
+                                       // sensitivity 1 (1500 px/s)
 
 /*******************************************************************************
- * Scroll Bindings (buttons/triggers can bind to these like mouse buttons)
+ * Mouse and Scroll Bindings (buttons/triggers can bind to these like keys)
  ******************************************************************************/
+#define BINDING_MOUSE_MIDDLE   0xFFFC
+#define BINDING_MOUSE_RIGHT    0xFFFD
+#define BINDING_MOUSE_LEFT     0xFFFE
 #define BINDING_SCROLL_UP      0xFFFA  // Content moves up (classic wheel up)
 #define BINDING_SCROLL_DOWN    0xFFFB  // Content moves down (two-finger swipe up
                                        // with macOS natural scrolling)
@@ -182,9 +199,6 @@ typedef struct {
     bool mouse_right;
     bool mouse_middle;
 
-    uint16_t prev_buttons;
-    uint16_t prev_left_trigger;
-    uint16_t prev_right_trigger;
     int16_t prev_left_stick_x;
     int16_t prev_left_stick_y;
     int16_t prev_right_stick_x;
@@ -210,8 +224,8 @@ typedef struct {
     float mouse_dy;
 
     // One physical control owns each source; shared keys/buttons stay held.
-    uint16_t source_binding[24];
-    bool source_pressed[24];
+    uint16_t source_binding[SOURCE_COUNT];
+    bool source_pressed[SOURCE_COUNT];
     uint8_t key_refs[256];
     uint8_t mouse_refs[3];
 

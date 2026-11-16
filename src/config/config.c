@@ -54,7 +54,8 @@ static const KeyMapping key_mappings[] = {
     {"f9", 0x65}, {"f10", 0x6D}, {"f11", 0x67}, {"f12", 0x6F},
 
     // Mouse buttons (special handling)
-    {"mouse_left", 0xFFFE}, {"mouse_right", 0xFFFD}, {"mouse_middle", 0xFFFC},
+    {"mouse_left", BINDING_MOUSE_LEFT}, {"mouse_right", BINDING_MOUSE_RIGHT},
+    {"mouse_middle", BINDING_MOUSE_MIDDLE},
 
     // Scroll wheel (one notch per press, repeats while held)
     {"scroll_up", BINDING_SCROLL_UP}, {"scroll_down", BINDING_SCROLL_DOWN},
@@ -106,8 +107,8 @@ void config_get_defaults(ControllerMapping *mapping) {
     // (right) click, matching the usual console layout (RT attacks/fires).
     mapping->triggers.left_trigger_mode = TRIGGER_MODE_MOUSE;
     mapping->triggers.right_trigger_mode = TRIGGER_MODE_MOUSE;
-    mapping->triggers.left_trigger_key = 0xFFFD;   // Right click
-    mapping->triggers.right_trigger_key = 0xFFFE;  // Left click
+    mapping->triggers.left_trigger_key = BINDING_MOUSE_RIGHT;
+    mapping->triggers.right_trigger_key = BINDING_MOUSE_LEFT;
     mapping->triggers.threshold = DEFAULT_THRESHOLD;
 
     // Feature settings
@@ -181,7 +182,8 @@ static void parse_trigger_binding(const char *value, TriggerMode *mode, uint16_t
     }
     uint16_t key = config_parse_key(value);
     if (key == 0xFFFF) return;
-    bool is_mouse = key == 0xFFFE || key == 0xFFFD || key == 0xFFFC;
+    bool is_mouse = key == BINDING_MOUSE_LEFT || key == BINDING_MOUSE_RIGHT ||
+                    key == BINDING_MOUSE_MIDDLE;
     *mode = is_mouse ? TRIGGER_MODE_MOUSE : TRIGGER_MODE_KEY;
     *binding = key;
 }

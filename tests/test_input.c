@@ -107,7 +107,7 @@ TEST(input_state_init) {
 
     input_state_init(&state);
 
-    ASSERT_EQ(state.prev_buttons, 0);
+    ASSERT_EQ(state.source_pressed[SOURCE_FIRST_BUTTON], false);
     ASSERT_EQ(state.mouse_left, false);
     ASSERT_EQ(state.mouse_right, false);
     ASSERT_FLOAT_EQ(state.mouse_dx, 0.0f, 0.001f);

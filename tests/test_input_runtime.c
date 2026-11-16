@@ -1,4 +1,5 @@
 #include "test_framework.h"
+#include <math.h>
 #include "../include/config.h"
 #include "../include/input.h"
 #include "../include/event.h"
@@ -95,7 +96,7 @@ TEST(button_mouse_binding_and_release_all) {
     InputState state;
     ControllerMapping mapping;
     setup(&state, &mapping);
-    mapping.buttons.key_a = 0xFFFE;
+    mapping.buttons.key_a = BINDING_MOUSE_LEFT;
 
     process_buttons(XBOX_BTN_A, &state, &mapping, NULL, NULL);
     process_triggers(0, 1023, &state, &mapping);
@@ -105,7 +106,6 @@ TEST(button_mouse_binding_and_release_all) {
     input_state_release_all(&state);
     ASSERT_EQ(mouse_up[MOUSE_BUTTON_LEFT], 1);
     ASSERT_FALSE(state.mouse_left);
-    ASSERT_EQ(state.prev_right_trigger, 0);
     TEST_PASS();
 }
 
@@ -140,6 +140,28 @@ TEST(right_stick_uses_right_mapping) {
     ASSERT_EQ(key_down[mapping.sticks.left_up], 0);
     process_sticks(0, 0, 0, 0, &state, &mapping, false);
     ASSERT_EQ(key_up[mapping.sticks.right_up], 1);
+    TEST_PASS();
+}
+
+static int rumbles;
+static void count_rumble(void *ctx) { (void)ctx; rumbles++; }
+
+/* Rumble fires once per press: not while held, not on release. */
+TEST(button_rumble_once_per_press) {
+    InputState state;
+    ControllerMapping mapping;
+    setup(&state, &mapping);
+    mapping.features.rumble.enabled = true;
+    mapping.features.rumble.button_feedback = true;
+    rumbles = 0;
+
+    process_buttons(XBOX_BTN_A, &state, &mapping, count_rumble, NULL);
+    process_buttons(XBOX_BTN_A, &state, &mapping, count_rumble, NULL);
+    ASSERT_EQ(rumbles, 1);
+    process_buttons(XBOX_BTN_A | XBOX_BTN_B, &state, &mapping, count_rumble, NULL);
+    ASSERT_EQ(rumbles, 2);
+    process_buttons(0, &state, &mapping, count_rumble, NULL);
+    ASSERT_EQ(rumbles, 2);
     TEST_PASS();
 }
 
@@ -233,6 +255,27 @@ TEST(motion_scales_with_elapsed_time) {
     TEST_PASS();
 }
 
+/* A full diagonal turns as fast as full straight-right (curve is radial). */
+TEST(diagonal_speed_matches_cardinal) {
+    InputState state;
+    ControllerMapping mapping;
+    setup(&state, &mapping);
+    mapping.sticks.mouse_smoothing = 0.0f;  // isolate the curve from the filter
+
+    process_sticks(0, 0, 28000, 0, &state, &mapping, false);
+    generate_continuous_movement(&state, &mapping, false, MOTION_TICK_MS);
+    float straight = sqrtf(last_dx * last_dx + last_dy * last_dy);
+
+    process_sticks(0, 0, 19799, 19799, &state, &mapping, false);  // same distance, 45 degrees
+    generate_continuous_movement(&state, &mapping, false, MOTION_TICK_MS);
+    float diagonal = sqrtf(last_dx * last_dx + last_dy * last_dy);
+
+    ASSERT(straight > 0.0f);
+    ASSERT_FLOAT_EQ(diagonal, straight, 0.01f * straight);
+    ASSERT_FLOAT_EQ(last_dx, last_dy, 0.001f);
+    TEST_PASS();
+}
+
 /* The smoothing filter settles the same amount per unit time, whatever the tick length. */
 TEST(smoothing_is_time_consistent) {
     InputState one_tick, two_ticks;
@@ -283,7 +326,9 @@ int main(void) {
     RUN_TEST(right_trigger_is_primary_click);
     RUN_TEST(motion_scales_with_elapsed_time);
     RUN_TEST(smoothing_is_time_consistent);
+    RUN_TEST(diagonal_speed_matches_cardinal);
     RUN_TEST(bumpers_scroll_tap_and_hold);
+    RUN_TEST(button_rumble_once_per_press);
     RUN_TEST(trigger_holds_across_pressure_bytes);
     RUN_TEST(overlapping_key_sources);
     RUN_TEST(button_mouse_binding_and_release_all);

@@ -39,15 +39,10 @@ float curve_lookup(float norm, float curve) {
 /*******************************************************************************
  * Button mask to index mapping
  ******************************************************************************/
-#define LEFT_TRIGGER_SOURCE 14
-#define RIGHT_TRIGGER_SOURCE 15
-#define LEFT_STICK_SOURCE 16
-#define RIGHT_STICK_SOURCE 20
-
 static int mouse_binding(uint16_t binding) {
-    if (binding == 0xFFFE) return MOUSE_BUTTON_LEFT;
-    if (binding == 0xFFFD) return MOUSE_BUTTON_RIGHT;
-    if (binding == 0xFFFC) return MOUSE_BUTTON_CENTER;
+    if (binding == BINDING_MOUSE_LEFT) return MOUSE_BUTTON_LEFT;
+    if (binding == BINDING_MOUSE_RIGHT) return MOUSE_BUTTON_RIGHT;
+    if (binding == BINDING_MOUSE_MIDDLE) return MOUSE_BUTTON_CENTER;
     return -1;
 }
 
@@ -100,15 +95,18 @@ static void change_binding_ref(InputState *state, uint16_t binding, bool pressed
     }
 }
 
-static void set_source(InputState *state, int source, uint16_t binding, bool pressed) {
+// Returns true when this call is a new press of the source (its press edge).
+static bool set_source(InputState *state, int source, uint16_t binding, bool pressed) {
     if (state->source_pressed[source] == pressed &&
-        (!pressed || state->source_binding[source] == binding)) return;
+        (!pressed || state->source_binding[source] == binding)) return false;
 
+    bool press_edge = pressed && !state->source_pressed[source];
     if (state->source_pressed[source])
         change_binding_ref(state, state->source_binding[source], false);
     state->source_binding[source] = binding;
     state->source_pressed[source] = pressed;
     if (pressed) change_binding_ref(state, binding, true);
+    return press_edge;
 }
 
 static void clear_stick_sources(InputState *state, int base) {
@@ -183,23 +181,21 @@ void process_buttons(uint16_t buttons, InputState *state, const ControllerMappin
         {XBOX_BTN_DPAD_LEFT, config->buttons.key_dpad_left},
         {XBOX_BTN_DPAD_RIGHT, config->buttons.key_dpad_right}
     };
+    // Button i is source i; the trigger and stick sources start after the last button.
+    _Static_assert(sizeof(button_map) / sizeof(button_map[0]) == XBOX_BTN_COUNT,
+                   "button_map must list exactly XBOX_BTN_COUNT buttons");
 
     for (int i = 0; i < XBOX_BTN_COUNT; i++) {
         bool is_pressed = (buttons & button_map[i].mask) != 0;
-        bool was_pressed = (state->prev_buttons & button_map[i].mask) != 0;
+        bool press_edge = set_source(state, SOURCE_FIRST_BUTTON + i,
+                                     button_map[i].keycode, is_pressed);
 
-        if (is_pressed != was_pressed) {
-            // Rumble feedback on button press
-            if (is_pressed && config->features.rumble.enabled &&
-                config->features.rumble.button_feedback && rumble_callback) {
-                rumble_callback(rumble_ctx);
-            }
+        // Rumble feedback once per press
+        if (press_edge && config->features.rumble.enabled &&
+            config->features.rumble.button_feedback && rumble_callback) {
+            rumble_callback(rumble_ctx);
         }
-
-        set_source(state, i, button_map[i].keycode, is_pressed);
     }
-
-    state->prev_buttons = buttons;
 }
 
 /*******************************************************************************
@@ -211,12 +207,10 @@ void process_triggers(uint16_t left_trigger, uint16_t right_trigger,
     bool left_pressed = (left_trigger > 1023 ? 255 : left_trigger >> 2) > config->triggers.threshold;
     bool right_pressed = (right_trigger > 1023 ? 255 : right_trigger >> 2) > config->triggers.threshold;
     // Each trigger holds its configured binding (a key or a mouse button).
-    set_source(state, LEFT_TRIGGER_SOURCE, config->triggers.left_trigger_key,
+    set_source(state, SOURCE_LEFT_TRIGGER, config->triggers.left_trigger_key,
                left_pressed && config->triggers.left_trigger_mode != TRIGGER_MODE_DISABLED);
-    set_source(state, RIGHT_TRIGGER_SOURCE, config->triggers.right_trigger_key,
+    set_source(state, SOURCE_RIGHT_TRIGGER, config->triggers.right_trigger_key,
                right_pressed && config->triggers.right_trigger_mode != TRIGGER_MODE_DISABLED);
-    state->prev_left_trigger = left_trigger;
-    state->prev_right_trigger = right_trigger;
 }
 
 /*******************************************************************************
@@ -265,17 +259,19 @@ void process_stick_as_mouse(int16_t x, int16_t y,
     float norm_x = *smoothed_x;
     float norm_y = *smoothed_y;
 
-    // Apply exponential curve using LUT
-    float sign_x = (norm_x >= 0) ? 1.0f : -1.0f;
-    float sign_y = (norm_y >= 0) ? 1.0f : -1.0f;
+    // Response curve on the stick's distance from center, keeping its
+    // direction, so a diagonal turns as fast as straight left/right.
+    float magnitude = sqrtf(norm_x * norm_x + norm_y * norm_y);
+    float scale = magnitude > 0.0f
+                  ? curve_lookup(magnitude, config->sticks.mouse_curve) / magnitude
+                  : 0.0f;
+    float curved_x = norm_x * scale;
+    float curved_y = norm_y * scale;
 
-    float curved_x = sign_x * curve_lookup(norm_x, config->sticks.mouse_curve);
-    float curved_y = sign_y * curve_lookup(norm_y, config->sticks.mouse_curve);
-
-    // Scale by sensitivity and elapsed time: 15 px per nominal tick at full
-    // tilt and sensitivity 1, so speed doesn't depend on loop timing.
-    float dx = curved_x * config->sticks.mouse_sensitivity * 15.0f * dt_scale;
-    float dy = curved_y * config->sticks.mouse_sensitivity * 15.0f * dt_scale;
+    // Scale by sensitivity and elapsed time so speed doesn't depend on loop timing.
+    float gain = config->sticks.mouse_sensitivity * MOUSE_PX_PER_TICK * dt_scale;
+    float dx = curved_x * gain;
+    float dy = curved_y * gain;
 
     // Accumulate deltas
     *mouse_dx += dx;
@@ -306,18 +302,18 @@ void process_sticks(int16_t left_x, int16_t left_y,
             process_stick_as_keys(left_x, left_y,
                                   config->sticks.left_up, config->sticks.left_down,
                                   config->sticks.left_left, config->sticks.left_right,
-                                  state, LEFT_STICK_SOURCE);
+                                  state, SOURCE_LEFT_STICK);
             break;
         case STICK_MODE_ARROWS:
             process_stick_as_keys(left_x, left_y, 0x7E, 0x7D, 0x7B, 0x7C,
-                                  state, LEFT_STICK_SOURCE);
+                                  state, SOURCE_LEFT_STICK);
             break;
         case STICK_MODE_MOUSE:
-            clear_stick_sources(state, LEFT_STICK_SOURCE);
+            clear_stick_sources(state, SOURCE_LEFT_STICK);
             break;
         case STICK_MODE_DISABLED:
         default:
-            clear_stick_sources(state, LEFT_STICK_SOURCE);
+            clear_stick_sources(state, SOURCE_LEFT_STICK);
             break;
     }
 
@@ -327,18 +323,18 @@ void process_sticks(int16_t left_x, int16_t left_y,
             process_stick_as_keys(right_x, right_y,
                                   config->sticks.right_up, config->sticks.right_down,
                                   config->sticks.right_left, config->sticks.right_right,
-                                  state, RIGHT_STICK_SOURCE);
+                                  state, SOURCE_RIGHT_STICK);
             break;
         case STICK_MODE_ARROWS:
             process_stick_as_keys(right_x, right_y, 0x7E, 0x7D, 0x7B, 0x7C,
-                                  state, RIGHT_STICK_SOURCE);
+                                  state, SOURCE_RIGHT_STICK);
             break;
         case STICK_MODE_MOUSE:
-            clear_stick_sources(state, RIGHT_STICK_SOURCE);
+            clear_stick_sources(state, SOURCE_RIGHT_STICK);
             break;
         case STICK_MODE_DISABLED:
         default:
-            clear_stick_sources(state, RIGHT_STICK_SOURCE);
+            clear_stick_sources(state, SOURCE_RIGHT_STICK);
             break;
     }
 
