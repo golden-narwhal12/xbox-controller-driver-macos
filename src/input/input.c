@@ -9,24 +9,24 @@
 #include <string.h>
 
 /*******************************************************************************
- * Lookup Tables for Optimization (Phase 4)
+ * Response Curve Lookup Table
  ******************************************************************************/
-static float POW_LUT[257];        // Pre-computed pow for curve 1.8
+static float POW_LUT[257];        // |norm|^curve sampled at 0, 1/256, ..., 1
 static bool lut_initialized = false;
 static float cached_curve = 0.0f;
 
 static void init_pow_lut(float curve) {
-    // Normalized values from 0.0 to 1.0 (256 steps)
     cached_curve = curve;
     for (int i = 0; i <= 256; i++) {
         float norm = (float)i / 256.0f;
         POW_LUT[i] = powf(norm, curve);
     }
+    lut_initialized = true;
 }
 
-static float fast_pow(float norm, float curve) {
-    // Reinitialize LUT if curve changed
-    if (curve != cached_curve) {
+float curve_lookup(float norm, float curve) {
+    // Rebuild the table on first use or when the configured curve changes
+    if (!lut_initialized || curve != cached_curve) {
         init_pow_lut(curve);
     }
 
@@ -34,13 +34,6 @@ static float fast_pow(float norm, float curve) {
     if (idx > 256) idx = 256;
     if (idx < 0) idx = 0;
     return POW_LUT[idx];
-}
-
-static void ensure_lut_initialized(float curve) {
-    if (!lut_initialized) {
-        init_pow_lut(curve);
-        lut_initialized = true;
-    }
 }
 
 /*******************************************************************************
@@ -58,7 +51,33 @@ static int mouse_binding(uint16_t binding) {
     return -1;
 }
 
+static int scroll_binding(uint16_t binding) {
+    if (binding == BINDING_SCROLL_UP) return 0;
+    if (binding == BINDING_SCROLL_DOWN) return 1;
+    return -1;
+}
+
+static int scroll_direction(int which) {
+    return which == 0 ? 1 : -1;
+}
+
 static void change_binding_ref(InputState *state, uint16_t binding, bool pressed) {
+    int scroll = scroll_binding(binding);
+    if (scroll >= 0) {
+        // Scrolling has no "up" event: one notch on press, repeats are timed
+        // in generate_continuous_movement() while the binding stays held.
+        uint8_t *refs = &state->scroll_refs[scroll];
+        if (pressed) {
+            if ((*refs)++ == 0) {
+                state->scroll_held_ms[scroll] = 0.0f;
+                send_scroll_event(scroll_direction(scroll));
+            }
+        } else if (*refs) {
+            --(*refs);
+        }
+        return;
+    }
+
     int mouse = mouse_binding(binding);
     if (mouse >= 0) {
         uint8_t *refs = &state->mouse_refs[mouse];
@@ -177,19 +196,7 @@ void process_buttons(uint16_t buttons, InputState *state, const ControllerMappin
             }
         }
 
-        bool turbo = config->features.turbo.enabled && state->turbo_enabled[i];
-        if (turbo && is_pressed) {
-            set_source(state, i, button_map[i].keycode, false);
-            state->turbo_counter[i]++;
-            if (config->features.turbo.rate && state->turbo_counter[i] >= config->features.turbo.rate) {
-                set_source(state, i, button_map[i].keycode, true);
-                set_source(state, i, button_map[i].keycode, false);
-                state->turbo_counter[i] = 0;
-            }
-        } else {
-            set_source(state, i, button_map[i].keycode, is_pressed);
-            state->turbo_counter[i] = 0;
-        }
+        set_source(state, i, button_map[i].keycode, is_pressed);
     }
 
     state->prev_buttons = buttons;
@@ -203,13 +210,10 @@ void process_triggers(uint16_t left_trigger, uint16_t right_trigger,
     // GIP reports 10-bit pressure. Keep the existing 0-255 config threshold scale.
     bool left_pressed = (left_trigger > 1023 ? 255 : left_trigger >> 2) > config->triggers.threshold;
     bool right_pressed = (right_trigger > 1023 ? 255 : right_trigger >> 2) > config->triggers.threshold;
-    uint16_t left_binding = config->triggers.left_trigger_mode == TRIGGER_MODE_MOUSE
-                            ? 0xFFFE : config->triggers.left_trigger_key;
-    uint16_t right_binding = config->triggers.right_trigger_mode == TRIGGER_MODE_MOUSE
-                             ? 0xFFFD : config->triggers.right_trigger_key;
-    set_source(state, LEFT_TRIGGER_SOURCE, left_binding,
+    // Each trigger holds its configured binding (a key or a mouse button).
+    set_source(state, LEFT_TRIGGER_SOURCE, config->triggers.left_trigger_key,
                left_pressed && config->triggers.left_trigger_mode != TRIGGER_MODE_DISABLED);
-    set_source(state, RIGHT_TRIGGER_SOURCE, right_binding,
+    set_source(state, RIGHT_TRIGGER_SOURCE, config->triggers.right_trigger_key,
                right_pressed && config->triggers.right_trigger_mode != TRIGGER_MODE_DISABLED);
     state->prev_left_trigger = left_trigger;
     state->prev_right_trigger = right_trigger;
@@ -246,17 +250,17 @@ void process_stick_as_keys(int16_t x, int16_t y,
 void process_stick_as_mouse(int16_t x, int16_t y,
                             float *smoothed_x, float *smoothed_y,
                             float *mouse_dx, float *mouse_dy,
-                            const ControllerMapping *config) {
-    ensure_lut_initialized(config->sticks.mouse_curve);
-
+                            const ControllerMapping *config, float dt_scale) {
     // Normalize to -1.0 to 1.0
     float target_x = x / (float)STICK_MAX;
     float target_y = y / (float)STICK_MAX;  // CoreGraphics screen Y grows downward
 
-    // Exponential smoothing
-    float alpha = 1.0f - config->sticks.mouse_smoothing;
-    *smoothed_x = alpha * target_x + (1.0f - alpha) * (*smoothed_x);
-    *smoothed_y = alpha * target_y + (1.0f - alpha) * (*smoothed_y);
+    // Exponential smoothing. `mouse_smoothing` is the fraction of the previous
+    // value kept per nominal tick; raising it to dt_scale keeps the filter's
+    // time constant the same when a tick runs long.
+    float keep = powf(config->sticks.mouse_smoothing, dt_scale);
+    *smoothed_x = (1.0f - keep) * target_x + keep * (*smoothed_x);
+    *smoothed_y = (1.0f - keep) * target_y + keep * (*smoothed_y);
 
     float norm_x = *smoothed_x;
     float norm_y = *smoothed_y;
@@ -265,12 +269,13 @@ void process_stick_as_mouse(int16_t x, int16_t y,
     float sign_x = (norm_x >= 0) ? 1.0f : -1.0f;
     float sign_y = (norm_y >= 0) ? 1.0f : -1.0f;
 
-    float curved_x = sign_x * fast_pow(norm_x, config->sticks.mouse_curve);
-    float curved_y = sign_y * fast_pow(norm_y, config->sticks.mouse_curve);
+    float curved_x = sign_x * curve_lookup(norm_x, config->sticks.mouse_curve);
+    float curved_y = sign_y * curve_lookup(norm_y, config->sticks.mouse_curve);
 
-    // Scale by sensitivity
-    float dx = curved_x * config->sticks.mouse_sensitivity * 15.0f;
-    float dy = curved_y * config->sticks.mouse_sensitivity * 15.0f;
+    // Scale by sensitivity and elapsed time: 15 px per nominal tick at full
+    // tilt and sensitivity 1, so speed doesn't depend on loop timing.
+    float dx = curved_x * config->sticks.mouse_sensitivity * 15.0f * dt_scale;
+    float dy = curved_y * config->sticks.mouse_sensitivity * 15.0f * dt_scale;
 
     // Accumulate deltas
     *mouse_dx += dx;
@@ -345,10 +350,39 @@ void process_sticks(int16_t left_x, int16_t left_y,
 }
 
 /*******************************************************************************
+ * Packet Decoding
+ ******************************************************************************/
+
+/*
+ * GIP reports stick +Y as up; everything in this file uses screen convention
+ * (+Y down, matching CoreGraphics). Bitwise NOT maps 32767 -> -32768 and
+ * -32768 -> 32767, avoiding the int16 overflow that unary minus has at
+ * -32768. Linux's xpad driver performs the same conversion.
+ */
+static int16_t gip_y_to_screen(int16_t y) {
+    return (int16_t)~y;
+}
+
+void process_input_packet(const GipInputPacket *packet, InputState *state,
+                          const ControllerMapping *config,
+                          void (*rumble_callback)(void *ctx), void *rumble_ctx) {
+    process_buttons(packet->buttons, state, config, rumble_callback, rumble_ctx);
+    process_triggers(packet->left_trigger, packet->right_trigger, state, config);
+    process_sticks(packet->left_stick_x, gip_y_to_screen(packet->left_stick_y),
+                   packet->right_stick_x, gip_y_to_screen(packet->right_stick_y),
+                   state, config, config->streaming_mode);
+}
+
+/*******************************************************************************
  * Continuous Movement Generation
  ******************************************************************************/
 void generate_continuous_movement(InputState *state, const ControllerMapping *config,
-                                  bool streaming_mode) {
+                                  bool streaming_mode, float dt_ms) {
+    if (dt_ms <= 0.0f) return;
+    // Clamp so a long stall (e.g. a reconnect) can't turn into one big jump.
+    if (dt_ms > MOTION_MAX_DT_MS) dt_ms = MOTION_MAX_DT_MS;
+    float dt_scale = dt_ms / MOTION_TICK_MS;
+
     int16_t left_x = state->dz_left_stick_x;
     int16_t left_y = state->dz_left_stick_y;
     int16_t right_x = state->dz_right_stick_x;
@@ -359,7 +393,7 @@ void generate_continuous_movement(InputState *state, const ControllerMapping *co
                                &state->smoothed_left_x,
                                &state->smoothed_left_y,
                                &state->mouse_dx, &state->mouse_dy,
-                               config);
+                               config, dt_scale);
     }
 
     if (config->sticks.right_stick_mode == STICK_MODE_MOUSE) {
@@ -367,7 +401,23 @@ void generate_continuous_movement(InputState *state, const ControllerMapping *co
                                &state->smoothed_right_x,
                                &state->smoothed_right_y,
                                &state->mouse_dx, &state->mouse_dy,
-                               config);
+                               config, dt_scale);
+    }
+
+    // Held scroll bindings repeat after a short delay, like a held key
+    for (int i = 0; i < 2; i++) {
+        if (!state->scroll_refs[i]) continue;
+        float before = state->scroll_held_ms[i];
+        float after = before + dt_ms;
+        state->scroll_held_ms[i] = after;
+        if (after < SCROLL_REPEAT_DELAY_MS) continue;
+        // Notches due = repeat slots crossed since the delay elapsed
+        int due_before = before < SCROLL_REPEAT_DELAY_MS ? 0
+                         : (int)((before - SCROLL_REPEAT_DELAY_MS) / SCROLL_REPEAT_MS) + 1;
+        int due_after = (int)((after - SCROLL_REPEAT_DELAY_MS) / SCROLL_REPEAT_MS) + 1;
+        for (int k = due_before; k < due_after; k++) {
+            send_scroll_event(scroll_direction(i));
+        }
     }
 
     // Send accumulated mouse movement

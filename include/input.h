@@ -6,6 +6,26 @@
 #define INPUT_H
 
 #include "types.h"
+#include "gip_protocol.h"
+
+/*******************************************************************************
+ * Packet Processing
+ *
+ * Decodes one GIP input packet into this layer's conventions (stick +Y is
+ * converted from GIP's "up" to screen "down") and runs buttons, triggers and
+ * sticks through the translation pipeline.
+ ******************************************************************************/
+void process_input_packet(const GipInputPacket *packet, InputState *state,
+                          const ControllerMapping *config,
+                          void (*rumble_callback)(void *ctx), void *rumble_ctx);
+
+/*******************************************************************************
+ * Response Curve
+ *
+ * |norm|^curve from a 257-entry lookup table over [0, 1] (truncating, no
+ * interpolation). Inputs beyond 1 return the table's last entry.
+ ******************************************************************************/
+float curve_lookup(float norm, float curve);
 
 /*******************************************************************************
  * Deadzone Processing
@@ -35,7 +55,7 @@ void process_stick_as_keys(int16_t x, int16_t y,
 void process_stick_as_mouse(int16_t x, int16_t y,
                             float *smoothed_x, float *smoothed_y,
                             float *mouse_dx, float *mouse_dy,
-                            const ControllerMapping *config);
+                            const ControllerMapping *config, float dt_scale);
 
 void process_sticks(int16_t left_x, int16_t left_y,
                     int16_t right_x, int16_t right_y,
@@ -44,9 +64,12 @@ void process_sticks(int16_t left_x, int16_t left_y,
 
 /*******************************************************************************
  * Continuous Movement
+ *
+ * Called on a timer. dt_ms is the measured time since the previous call;
+ * motion and smoothing are scaled by it (clamped to MOTION_MAX_DT_MS).
  ******************************************************************************/
 void generate_continuous_movement(InputState *state, const ControllerMapping *config,
-                                  bool streaming_mode);
+                                  bool streaming_mode, float dt_ms);
 
 /*******************************************************************************
  * State Management

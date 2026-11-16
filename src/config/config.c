@@ -56,6 +56,9 @@ static const KeyMapping key_mappings[] = {
     // Mouse buttons (special handling)
     {"mouse_left", 0xFFFE}, {"mouse_right", 0xFFFD}, {"mouse_middle", 0xFFFC},
 
+    // Scroll wheel (one notch per press, repeats while held)
+    {"scroll_up", BINDING_SCROLL_UP}, {"scroll_down", BINDING_SCROLL_DOWN},
+
     {NULL, 0}
 };
 
@@ -70,8 +73,8 @@ void config_get_defaults(ControllerMapping *mapping) {
     mapping->buttons.key_b = 0x08;  // C
     mapping->buttons.key_x = 0x0F;  // R
     mapping->buttons.key_y = 0x03;  // F
-    mapping->buttons.key_lb = 0x0C; // Q
-    mapping->buttons.key_rb = 0x0E; // E
+    mapping->buttons.key_lb = BINDING_SCROLL_UP;    // Scroll up
+    mapping->buttons.key_rb = BINDING_SCROLL_DOWN;  // Scroll down (two-finger swipe up)
     mapping->buttons.key_ls = 0x38; // Left Shift
     mapping->buttons.key_rs = 0x3B; // Left Control
     mapping->buttons.key_view = 0x30;   // Tab
@@ -99,11 +102,12 @@ void config_get_defaults(ControllerMapping *mapping) {
     mapping->sticks.mouse_smoothing = DEFAULT_SMOOTHING;
     mapping->sticks.deadzone = DEFAULT_DEADZONE;
 
-    // Trigger settings
+    // Trigger settings: RT is the primary (left) click, LT the secondary
+    // (right) click, matching the usual console layout (RT attacks/fires).
     mapping->triggers.left_trigger_mode = TRIGGER_MODE_MOUSE;
     mapping->triggers.right_trigger_mode = TRIGGER_MODE_MOUSE;
-    mapping->triggers.left_trigger_key = 0x06;  // Z
-    mapping->triggers.right_trigger_key = 0x07; // X
+    mapping->triggers.left_trigger_key = 0xFFFD;   // Right click
+    mapping->triggers.right_trigger_key = 0xFFFE;  // Left click
     mapping->triggers.threshold = DEFAULT_THRESHOLD;
 
     // Feature settings
@@ -111,11 +115,6 @@ void config_get_defaults(ControllerMapping *mapping) {
     mapping->features.rumble.button_feedback = true;
     mapping->features.rumble.intensity = 100;
     mapping->features.rumble.duration_ms = RUMBLE_DURATION_MS;
-
-    mapping->features.turbo.enabled = true;
-    mapping->features.turbo.rate = DEFAULT_TURBO_RATE;
-
-    mapping->features.analog_keyboard.enabled = false;
 
     // General settings
     mapping->console_output_enabled = true;
@@ -168,6 +167,23 @@ const char* config_key_name(uint16_t keycode) {
         }
     }
     return "unknown";
+}
+
+/*
+ * A trigger can be bound to any key or mouse button name, the same as a
+ * button ("mouse_left", "mouse_right", "space", ...), or to "disabled".
+ * Unknown names leave the current setting unchanged.
+ */
+static void parse_trigger_binding(const char *value, TriggerMode *mode, uint16_t *binding) {
+    if (strcmp(value, "disabled") == 0) {
+        *mode = TRIGGER_MODE_DISABLED;
+        return;
+    }
+    uint16_t key = config_parse_key(value);
+    if (key == 0xFFFF) return;
+    bool is_mouse = key == 0xFFFE || key == 0xFFFD || key == 0xFFFC;
+    *mode = is_mouse ? TRIGGER_MODE_MOUSE : TRIGGER_MODE_KEY;
+    *binding = key;
 }
 
 /*******************************************************************************
@@ -456,31 +472,13 @@ int config_load(const char *path, ControllerMapping *mapping) {
     if (triggers) {
         if ((p = find_key(triggers, "left"))) {
             parse_string(p, str_val, sizeof(str_val));
-            if (strcmp(str_val, "mouse_left") == 0) {
-                mapping->triggers.left_trigger_mode = TRIGGER_MODE_MOUSE;
-            } else if (strcmp(str_val, "disabled") == 0) {
-                mapping->triggers.left_trigger_mode = TRIGGER_MODE_DISABLED;
-            } else {
-                uint16_t key = config_parse_key(str_val);
-                if (key != 0xFFFF) {
-                    mapping->triggers.left_trigger_mode = TRIGGER_MODE_KEY;
-                    mapping->triggers.left_trigger_key = key;
-                }
-            }
+            parse_trigger_binding(str_val, &mapping->triggers.left_trigger_mode,
+                                  &mapping->triggers.left_trigger_key);
         }
         if ((p = find_key(triggers, "right"))) {
             parse_string(p, str_val, sizeof(str_val));
-            if (strcmp(str_val, "mouse_right") == 0) {
-                mapping->triggers.right_trigger_mode = TRIGGER_MODE_MOUSE;
-            } else if (strcmp(str_val, "disabled") == 0) {
-                mapping->triggers.right_trigger_mode = TRIGGER_MODE_DISABLED;
-            } else {
-                uint16_t key = config_parse_key(str_val);
-                if (key != 0xFFFF) {
-                    mapping->triggers.right_trigger_mode = TRIGGER_MODE_KEY;
-                    mapping->triggers.right_trigger_key = key;
-                }
-            }
+            parse_trigger_binding(str_val, &mapping->triggers.right_trigger_mode,
+                                  &mapping->triggers.right_trigger_key);
         }
         if ((p = find_key(triggers, "threshold"))) {
             if (parse_number(p, &num_val) != p && num_val >= 0 && num_val <= 255)
@@ -506,22 +504,6 @@ int config_load(const char *path, ControllerMapping *mapping) {
             if ((p = find_key(rumble, "duration_ms"))) {
                 if (parse_number(p, &num_val) != p && num_val >= 0 && num_val <= 2550)
                     mapping->features.rumble.duration_ms = (uint16_t)num_val;
-            }
-        }
-        const char *turbo = find_key(features, "turbo");
-        if (turbo) {
-            if ((p = find_key(turbo, "enabled"))) {
-                if (parse_bool(p, &bool_val)) mapping->features.turbo.enabled = bool_val;
-            }
-            if ((p = find_key(turbo, "rate"))) {
-                if (parse_number(p, &num_val) != p && num_val >= 1 && num_val <= 255)
-                    mapping->features.turbo.rate = (uint8_t)num_val;
-            }
-        }
-        const char *analog = find_key(features, "analog_keyboard");
-        if (analog) {
-            if ((p = find_key(analog, "enabled"))) {
-                if (parse_bool(p, &bool_val)) mapping->features.analog_keyboard.enabled = bool_val;
             }
         }
     }
@@ -628,13 +610,15 @@ int config_reload_if_changed(const char *path, ControllerMapping *mapping, struc
  ******************************************************************************/
 void config_print(const ControllerMapping *mapping) {
     const char *stick_mode_names[] = {"WASD", "Arrows", "Mouse", "Disabled"};
-    const char *trigger_mode_names[] = {"Mouse", "Key", "Disabled"};
+    const TriggerMapping *t = &mapping->triggers;
 
     printf("Configuration:\n");
     printf("  Left stick: %s\n", stick_mode_names[mapping->sticks.left_stick_mode]);
     printf("  Right stick: %s\n", stick_mode_names[mapping->sticks.right_stick_mode]);
-    printf("  Left trigger: %s\n", trigger_mode_names[mapping->triggers.left_trigger_mode]);
-    printf("  Right trigger: %s\n", trigger_mode_names[mapping->triggers.right_trigger_mode]);
+    printf("  Left trigger: %s\n", t->left_trigger_mode == TRIGGER_MODE_DISABLED
+                                   ? "disabled" : config_key_name(t->left_trigger_key));
+    printf("  Right trigger: %s\n", t->right_trigger_mode == TRIGGER_MODE_DISABLED
+                                    ? "disabled" : config_key_name(t->right_trigger_key));
     printf("  Deadzone: %d (%.1f%%)\n", mapping->sticks.deadzone,
            (mapping->sticks.deadzone / 32767.0f) * 100.0f);
     printf("  Mouse smoothing: %.2f\n", mapping->sticks.mouse_smoothing);
@@ -642,5 +626,4 @@ void config_print(const ControllerMapping *mapping) {
     printf("  Mouse curve: %.1f\n", mapping->sticks.mouse_curve);
     printf("  Streaming mode: %s\n", mapping->streaming_mode ? "ENABLED" : "disabled");
     printf("  Rumble: %s\n", mapping->features.rumble.enabled ? "enabled" : "disabled");
-    printf("  Turbo: %s\n", mapping->features.turbo.enabled ? "enabled" : "disabled");
 }

@@ -100,6 +100,36 @@ void send_mouse_button_event(int button, bool pressed) {
     }
 }
 
+static bool on_a_display(CGPoint p) {
+    uint32_t count = 0;
+    return CGGetDisplaysWithPoint(p, 0, NULL, &count) == kCGErrorSuccess && count > 0;
+}
+
+static CGPoint clamp_to_displays(CGPoint pos, float dx, float dy) {
+    CGPoint both = CGPointMake(pos.x + dx, pos.y + dy);
+    if (on_a_display(both)) return both;
+    CGPoint x_only = CGPointMake(pos.x + dx, pos.y);
+    if (on_a_display(x_only)) return x_only;
+    CGPoint y_only = CGPointMake(pos.x, pos.y + dy);
+    if (on_a_display(y_only)) return y_only;
+    return pos;
+}
+
+void send_scroll_event(int lines) {
+    // Line units behave like scroll-wheel notches (one hotbar slot in games,
+    // a few lines in documents). Positive scrolls content up.
+    CGEventRef event = CGEventCreateScrollWheelEvent(event_source(), kCGScrollEventUnitLine,
+                                                     1, (int32_t)lines);
+    if (event) {
+        CGEventSetFlags(event, current_flags());
+        CGEventPost(kCGHIDEventTap, event);
+        CFRelease(event);
+        LOG_DEBUG("Scroll event: lines=%d", lines);
+    } else {
+        LOG_ERROR("Failed to create scroll event");
+    }
+}
+
 void send_mouse_movement(float dx, float dy, bool streaming_mode,
                          bool left_down, bool right_down, bool middle_down) {
     if (dx == 0.0f && dy == 0.0f) {
@@ -140,8 +170,11 @@ void send_mouse_movement(float dx, float dy, bool streaming_mode,
         // Streaming mode: Use delta fields (for Moonlight, Parsec, etc.)
         event = CGEventCreateMouseEvent(event_source(), type, currentPos, button);
     } else {
-        // Local mode: Use absolute positioning (for native macOS apps)
-        CGPoint newPos = CGPointMake(currentPos.x + dx, currentPos.y + dy);
+        // Local mode: move the cursor (for desktop apps). At a screen edge the
+        // cursor cannot follow, so keep whichever axis still fits and let the
+        // delta fields below carry the rest; apps that capture the mouse
+        // (games looking around) keep turning instead of stalling at the edge.
+        CGPoint newPos = clamp_to_displays(currentPos, dx, dy);
         event = CGEventCreateMouseEvent(event_source(), type, newPos, button);
     }
 

@@ -25,6 +25,8 @@ void send_key_event(uint16_t keycode, bool pressed);
 void send_mouse_button_event(int button, bool pressed);
 void send_mouse_movement(float dx, float dy, bool streaming_mode,
                          bool left_down, bool right_down, bool middle_down);
+/* Scroll by whole wheel notches (line units); positive scrolls content up. */
+void send_scroll_event(int lines);
 void event_cleanup(void);
 
 #endif // EVENT_H

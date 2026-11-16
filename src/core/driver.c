@@ -134,10 +134,10 @@ void driver_cleanup(DriverContext *ctx) {
 /*******************************************************************************
  * Input Loop
  ******************************************************************************/
-static uint64_t monotonic_ms(void) {
+static uint64_t monotonic_us(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    return (uint64_t)now.tv_sec * 1000000u + (uint64_t)now.tv_nsec / 1000u;
 }
 
 int driver_input_loop(DriverContext *ctx) {
@@ -145,8 +145,8 @@ int driver_input_loop(DriverContext *ctx) {
     int transferred;
     int result;
     int input_count = 0;
-    uint64_t last_motion = monotonic_ms();
-    uint64_t last_reload = last_motion;
+    uint64_t last_motion_us = monotonic_us();
+    uint64_t last_reload_us = last_motion_us;
 
     printf("=== Xbox Controller Simulator Active ===\n");
     printf("Controller input is now being translated to keyboard/mouse\n");
@@ -176,14 +176,9 @@ int driver_input_loop(DriverContext *ctx) {
                 // Read config with read lock
                 rwlock_read_lock(&g_config_lock);
 
-                // Process input
-                process_buttons(input->buttons, &ctx->input_state, &ctx->config,
-                               rumble_callback, ctx);
-                process_triggers(input->left_trigger, input->right_trigger,
-                                &ctx->input_state, &ctx->config);
-                process_sticks(input->left_stick_x, input->left_stick_y,
-                              input->right_stick_x, input->right_stick_y,
-                              &ctx->input_state, &ctx->config, ctx->config.streaming_mode);
+                // Decode and translate the packet
+                process_input_packet(input, &ctx->input_state, &ctx->config,
+                                     rumble_callback, ctx);
 
                 bool rumble_pending = ctx->rumble_pending;
                 ctx->rumble_pending = false;
@@ -251,19 +246,24 @@ int driver_input_loop(DriverContext *ctx) {
             }
         }
 
-        uint64_t now = monotonic_ms();
-        if (now - last_motion >= 10) {
-            last_motion = now;
+        // Mouse motion runs on its own clock, not on packet arrival. The tick
+        // shares this loop with a blocking USB read, so its period varies;
+        // pass the measured elapsed time so turning speed stays constant.
+        uint64_t now_us = monotonic_us();
+        uint64_t elapsed_us = now_us - last_motion_us;
+        if (elapsed_us >= (uint64_t)(MOTION_TICK_MS * 1000.0f)) {
+            last_motion_us = now_us;
             mutex_lock(&g_state_mutex);
             rwlock_read_lock(&g_config_lock);
-            generate_continuous_movement(&ctx->input_state, &ctx->config, ctx->config.streaming_mode);
+            generate_continuous_movement(&ctx->input_state, &ctx->config,
+                                         ctx->config.streaming_mode, elapsed_us / 1000.0f);
             rwlock_read_unlock(&g_config_lock);
             mutex_unlock(&g_state_mutex);
         }
 
         bool force_reload = atomic_exchange(&g_reload_requested.value, false);
-        if (force_reload || now - last_reload >= 1000) {
-            last_reload = now;
+        if (force_reload || now_us - last_reload_us >= 1000000u) {
+            last_reload_us = now_us;
             mutex_lock(&g_state_mutex);
             rwlock_write_lock(&g_config_lock);
             struct timespec previous_modified = ctx->config_last_modified;

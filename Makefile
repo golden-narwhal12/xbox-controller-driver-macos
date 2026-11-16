@@ -115,8 +115,8 @@ test: test-input test-input-runtime test-config test-lut
 	@echo ""
 	@echo "All tests completed!"
 
-test-input: tests/test_input.c include/types.h | build
-	$(CC) $(CFLAGS) $< -o build/test_input -lm
+test-input: tests/test_input.c src/input/input.c src/log.c include/types.h include/input.h | build
+	$(CC) $(CFLAGS) tests/test_input.c src/input/input.c src/log.c -o build/test_input -lm
 	@echo ""
 	@echo "Running input tests..."
 	@./build/test_input
@@ -131,8 +131,8 @@ test-config: tests/test_config.c src/config/config.c include/types.h include/con
 	@echo "Running config tests..."
 	@./build/test_config
 
-test-lut: tests/test_lut.c | build
-	$(CC) $(CFLAGS) $< -o build/test_lut -lm
+test-lut: tests/test_lut.c src/input/input.c src/log.c include/input.h | build
+	$(CC) $(CFLAGS) tests/test_lut.c src/input/input.c src/log.c -o build/test_lut -lm
 	@echo ""
 	@echo "Running LUT tests..."
 	@./build/test_lut
