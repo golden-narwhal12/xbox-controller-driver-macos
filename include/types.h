@@ -84,9 +84,23 @@ typedef enum {
 #define DEFAULT_THRESHOLD      127
 
 /*******************************************************************************
+ * Motion Timing
+ ******************************************************************************/
+#define MOTION_TICK_MS         10.0f   // Nominal mouse-motion tick; gains are per tick
+#define MOTION_MAX_DT_MS       50.0f   // Longest elapsed time applied in one tick
+
+/*******************************************************************************
+ * Scroll Bindings (buttons/triggers can bind to these like mouse buttons)
+ ******************************************************************************/
+#define BINDING_SCROLL_UP      0xFFFA  // Content moves up (classic wheel up)
+#define BINDING_SCROLL_DOWN    0xFFFB  // Content moves down (two-finger swipe up
+                                       // with macOS natural scrolling)
+#define SCROLL_REPEAT_DELAY_MS 300.0f  // Hold this long before repeating
+#define SCROLL_REPEAT_MS       80.0f   // Then one notch per interval while held
+
+/*******************************************************************************
  * Feature Constants
  ******************************************************************************/
-#define DEFAULT_TURBO_RATE     10
 #define RUMBLE_DURATION_MS     50
 #define MAX_RECONNECT_ATTEMPTS 5
 #define RECONNECT_DELAY_MS     5000
@@ -140,27 +154,10 @@ typedef struct {
 } RumbleSettings;
 
 /*******************************************************************************
- * Turbo Settings Structure
- ******************************************************************************/
-typedef struct {
-    bool enabled;
-    uint8_t rate;
-} TurboSettings;
-
-/*******************************************************************************
- * Analog Keyboard Settings Structure
- ******************************************************************************/
-typedef struct {
-    bool enabled;
-} AnalogKeySettings;
-
-/*******************************************************************************
  * Feature Settings Structure
  ******************************************************************************/
 typedef struct {
     RumbleSettings rumble;
-    TurboSettings turbo;
-    AnalogKeySettings analog_keyboard;
 } FeatureSettings;
 
 /*******************************************************************************
@@ -212,15 +209,15 @@ typedef struct {
     float mouse_dx;
     float mouse_dy;
 
-    // Turbo state
-    bool turbo_enabled[XBOX_BTN_COUNT];
-    uint8_t turbo_counter[XBOX_BTN_COUNT];
-
     // One physical control owns each source; shared keys/buttons stay held.
     uint16_t source_binding[24];
     bool source_pressed[24];
     uint8_t key_refs[256];
     uint8_t mouse_refs[3];
+
+    // Scroll bindings: [0] = up, [1] = down. One notch on press, then repeat while held.
+    uint8_t scroll_refs[2];
+    float scroll_held_ms[2];
 } InputState;
 
 /*******************************************************************************

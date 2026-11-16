@@ -16,14 +16,15 @@ A userspace driver that translates Xbox One controller input to keyboard and mou
 
 - Left stick: WASD keys
 - Right stick: Mouse movement
-- Triggers: Mouse clicks (left/right)
+- Right trigger: Left click
+- Left trigger: Right click
 - A/B/X/Y: Space, C, R, F
-- Bumpers: Q, E
+- Bumpers: scroll (RB = scroll down; LB = scroll up)
 - D-pad: Arrow keys
 
 ## Requirements
 
-- macOS (tested on Tahoe 26.1 and 26.5)
+- macOS (tested on 26.1, 26.5, 27.2)
 - A supported USB controller (see below)
 - Homebrew with libusb and pkg-config
 
@@ -72,15 +73,15 @@ Edit `config/controller.json` to customize mappings when running from the reposi
     "buttons": { "a": "space", "b": "c", "x": "r", "y": "f" },
     "left_stick": { "mode": "wasd", "deadzone": 8000 },
     "right_stick": { "mode": "mouse", "sensitivity": 1.5, "curve": 1.8 },
-    "triggers": { "left": "mouse_left", "right": "mouse_right" }
+    "triggers": { "left": "mouse_right", "right": "mouse_left" }
 }
 ```
 
 You can also place your config at `~/.config/xbox-controller/config.json`.
 
-Key names: letters (a-z), numbers (0-9), space, tab, escape, return, left_shift, left_control, up, down, left, right, f1-f12, mouse_left, mouse_right.
+Key names: letters (a-z), numbers (0-9), space, tab, escape, return, left_shift, left_control, up, down, left, right, f1-f12, mouse_left, mouse_right, mouse_middle, scroll_up, scroll_down.
 
-Buttons (including `dpad_up`, `dpad_down`, `dpad_left`, and `dpad_right`) can map to keys or mouse buttons. Each stick can also specify `up`, `down`, `left`, and `right` key names when using a keyboard mode. Trigger `threshold` remains on a 0-255 scale; the driver's 10-bit trigger readings are scaled to match it. A held trigger keeps its mouse button or key pressed until release.
+Buttons (including `dpad_up`, `dpad_down`, `dpad_left`, and `dpad_right`) and triggers can map to keys or mouse buttons; a trigger can also be `disabled`. Each stick can also specify `up`, `down`, `left`, and `right` key names when using a keyboard mode. Trigger `threshold` remains on a 0-255 scale; the driver's 10-bit trigger readings are scaled to match it. A held trigger keeps its mouse button or key pressed until release.
 
 ## Build Targets
 

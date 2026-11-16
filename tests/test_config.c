@@ -20,6 +20,9 @@ TEST(config_defaults_buttons) {
     ASSERT_EQ(mapping.buttons.key_b, 0x08);  // C
     ASSERT_EQ(mapping.buttons.key_x, 0x0F);  // R
     ASSERT_EQ(mapping.buttons.key_y, 0x03);  // F
+    ASSERT_EQ(mapping.buttons.key_lb, config_parse_key("scroll_up"));
+    ASSERT_EQ(mapping.buttons.key_rb, config_parse_key("scroll_down"));
+    ASSERT_EQ(config_parse_key("scroll_down"), BINDING_SCROLL_DOWN);
     TEST_PASS();
 }
 
@@ -40,7 +43,37 @@ TEST(config_defaults_triggers) {
 
     ASSERT_EQ(mapping.triggers.left_trigger_mode, TRIGGER_MODE_MOUSE);
     ASSERT_EQ(mapping.triggers.right_trigger_mode, TRIGGER_MODE_MOUSE);
+    ASSERT_EQ(mapping.triggers.left_trigger_key, config_parse_key("mouse_right"));
+    ASSERT_EQ(mapping.triggers.right_trigger_key, config_parse_key("mouse_left"));
     ASSERT_EQ(mapping.triggers.threshold, DEFAULT_THRESHOLD);
+    TEST_PASS();
+}
+
+/* Triggers accept any key or mouse name (old "left": "mouse_left" configs too). */
+TEST(config_trigger_bindings_parse) {
+    char path[] = "/tmp/xbox-trigger-test-XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    const char *json = "{\"triggers\":{\"left\":\"mouse_left\",\"right\":\"space\"}}";
+    ASSERT_EQ(write(fd, json, strlen(json)), (ssize_t)strlen(json));
+    close(fd);
+
+    ControllerMapping mapping;
+    ASSERT_EQ(config_load(path, &mapping), 0);
+    ASSERT_EQ(mapping.triggers.left_trigger_mode, TRIGGER_MODE_MOUSE);
+    ASSERT_EQ(mapping.triggers.left_trigger_key, config_parse_key("mouse_left"));
+    ASSERT_EQ(mapping.triggers.right_trigger_mode, TRIGGER_MODE_KEY);
+    ASSERT_EQ(mapping.triggers.right_trigger_key, config_parse_key("space"));
+
+    fd = open(path, O_WRONLY | O_TRUNC);
+    ASSERT(fd >= 0);
+    const char *disabled = "{\"triggers\":{\"left\":\"disabled\"}}";
+    ASSERT_EQ(write(fd, disabled, strlen(disabled)), (ssize_t)strlen(disabled));
+    close(fd);
+    ASSERT_EQ(config_load(path, &mapping), 0);
+    ASSERT_EQ(mapping.triggers.left_trigger_mode, TRIGGER_MODE_DISABLED);
+    ASSERT_EQ(mapping.triggers.right_trigger_mode, TRIGGER_MODE_MOUSE);
+    unlink(path);
     TEST_PASS();
 }
 
@@ -49,8 +82,24 @@ TEST(config_defaults_features) {
     config_get_defaults(&mapping);
 
     ASSERT_TRUE(mapping.features.rumble.enabled);
-    ASSERT_TRUE(mapping.features.turbo.enabled);
-    ASSERT_FALSE(mapping.features.analog_keyboard.enabled);
+    TEST_PASS();
+}
+
+/* Configs written for older versions (with turbo/analog_keyboard) still load. */
+TEST(config_ignores_removed_options) {
+    char path[] = "/tmp/xbox-old-config-XXXXXX";
+    int fd = mkstemp(path);
+    ASSERT(fd >= 0);
+    const char *json = "{\"features\":{\"rumble\":{\"enabled\":false},"
+                       "\"turbo\":{\"enabled\":true,\"rate\":10},"
+                       "\"analog_keyboard\":{\"enabled\":false}}}";
+    ASSERT_EQ(write(fd, json, strlen(json)), (ssize_t)strlen(json));
+    close(fd);
+
+    ControllerMapping mapping;
+    ASSERT_EQ(config_load(path, &mapping), 0);
+    ASSERT_FALSE(mapping.features.rumble.enabled);
+    unlink(path);
     TEST_PASS();
 }
 
@@ -166,7 +215,9 @@ int main(void) {
     RUN_TEST(config_defaults_buttons);
     RUN_TEST(config_defaults_sticks);
     RUN_TEST(config_defaults_triggers);
+    RUN_TEST(config_trigger_bindings_parse);
     RUN_TEST(config_defaults_features);
+    RUN_TEST(config_ignores_removed_options);
 
     printf("\n-- Key Parsing Tests --\n");
     RUN_TEST(config_parse_key_letters);

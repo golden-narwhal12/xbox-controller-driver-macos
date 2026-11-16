@@ -3,11 +3,12 @@
  ******************************************************************************/
 
 #include "test_framework.h"
-#include "../include/types.h"
+#include "../include/input.h"
 #include <math.h>
 
 /*******************************************************************************
- * Mock event functions (we can't inject actual events in tests)
+ * Mock event functions (we can't inject actual events in tests). These
+ * replace the macOS event layer when linking the real src/input/input.c.
  ******************************************************************************/
 static int g_key_events_count = 0;
 static int g_mouse_events_count = 0;
@@ -24,27 +25,20 @@ void send_mouse_button_event(int button, bool pressed) {
     g_mouse_events_count++;
 }
 
-void send_mouse_movement(float dx, float dy, bool streaming_mode) {
-    (void)dx;
-    (void)dy;
-    (void)streaming_mode;
+void send_scroll_event(int lines) {
+    (void)lines;
     g_mouse_events_count++;
 }
 
-/*******************************************************************************
- * Inline implementation of apply_deadzone for testing
- ******************************************************************************/
-static void apply_deadzone(int16_t *x, int16_t *y, int16_t deadzone) {
-    float magnitude = sqrtf((float)(*x) * (*x) + (float)(*y) * (*y));
-
-    if (magnitude < deadzone) {
-        *x = 0;
-        *y = 0;
-    } else if (magnitude > 32767) {
-        float scale = 32767.0f / magnitude;
-        *x = (int16_t)(*x * scale);
-        *y = (int16_t)(*y * scale);
-    }
+void send_mouse_movement(float dx, float dy, bool streaming_mode,
+                         bool left_down, bool right_down, bool middle_down) {
+    (void)dx;
+    (void)dy;
+    (void)streaming_mode;
+    (void)left_down;
+    (void)right_down;
+    (void)middle_down;
+    g_mouse_events_count++;
 }
 
 /*******************************************************************************
@@ -111,8 +105,7 @@ TEST(input_state_init) {
     InputState state;
     memset(&state, 0xFF, sizeof(state));  // Fill with garbage
 
-    // Manually clear like input_state_init would
-    memset(&state, 0, sizeof(state));
+    input_state_init(&state);
 
     ASSERT_EQ(state.prev_buttons, 0);
     ASSERT_EQ(state.mouse_left, false);
