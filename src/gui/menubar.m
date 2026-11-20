@@ -4,6 +4,25 @@
 
 #import <Cocoa/Cocoa.h>
 #include "../../include/menubar.h"
+#include "../../include/platform.h"
+
+/* Ends [NSApp run] so menubar_run() returns and main() can clean up.
+   [NSApp terminate:] would exit the process on the spot, skipping the code
+   that releases held keys. Main thread only. */
+static void stop_run_loop(void) {
+    [NSApp stop:nil];
+    // -stop: only takes effect after the next event; post one to wake the loop
+    NSEvent *wake = [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                                       location:NSZeroPoint
+                                  modifierFlags:0
+                                      timestamp:0
+                                   windowNumber:0
+                                        context:nil
+                                        subtype:0
+                                          data1:0
+                                          data2:0];
+    [NSApp postEvent:wake atStart:YES];
+}
 
 /*******************************************************************************
  * AppDelegate
@@ -23,6 +42,29 @@
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     [self setupStatusBar];
+
+    // Refresh the cursor-confinement target as soon as the frontmost app changes
+    [[[NSWorkspace sharedWorkspace] notificationCenter]
+        addObserver:self
+           selector:@selector(activeAppChanged:)
+               name:NSWorkspaceDidActivateApplicationNotification
+             object:nil];
+}
+
+- (void)activeAppChanged:(NSNotification *)notification {
+    (void)notification;
+    window_tracker_poke();
+}
+
+/* Logout, shutdown or anything else that terminates the app: leave through
+   the normal path instead, so held keys are released. */
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    (void)sender;
+    if (self.quitCallback) {
+        self.quitCallback(self.context);
+    }
+    stop_run_loop();
+    return NSTerminateCancel;
 }
 
 - (void)setupStatusBar {
@@ -130,11 +172,7 @@
     [alert setInformativeText:@"A macOS driver for Xbox One controllers.\n\nTranslates controller input to keyboard and mouse events.\n\nVersion 2.0"];
     [alert setAlertStyle:NSAlertStyleInformational];
     [alert addButtonWithTitle:@"OK"];
-
-    // Run modal on main thread
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [alert runModal];
-    });
+    [alert runModal];   // menu actions already run on the main thread
 }
 
 - (void)quitApp:(id)sender {
@@ -142,7 +180,7 @@
     if (self.quitCallback) {
         self.quitCallback(self.context);
     }
-    [NSApp terminate:nil];
+    stop_run_loop();
 }
 
 - (void)setStatusText:(NSString *)status {
@@ -206,6 +244,6 @@ void menubar_run(void) {
 
 void menubar_quit(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        [NSApp terminate:nil];
+        stop_run_loop();
     });
 }

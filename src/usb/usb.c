@@ -125,8 +125,12 @@ int usb_open_device(UsbContext *ctx) {
     LOG_INFO("Claimed interface");
 
     // Get endpoints
-    struct libusb_config_descriptor *desc;
+    struct libusb_config_descriptor *desc = NULL;
     result = libusb_get_active_config_descriptor(libusb_get_device(ctx->handle), &desc);
+    if (result == 0 && (desc->bNumInterfaces < 1 || desc->interface[0].num_altsetting < 1)) {
+        libusb_free_config_descriptor(desc);
+        result = LIBUSB_ERROR_NOT_FOUND;
+    }
     if (result < 0) {
         LOG_ERROR("Failed to get config descriptor: %s", libusb_error_name(result));
         libusb_release_interface(ctx->handle, 0);
@@ -143,7 +147,7 @@ int usb_open_device(UsbContext *ctx) {
 
     for (int i = 0; i < interdesc->bNumEndpoints; i++) {
         const struct libusb_endpoint_descriptor *ep = &interdesc->endpoint[i];
-        if ((ep->bmAttributes & 0x03) == LIBUSB_TRANSFER_TYPE_INTERRUPT) {
+        if ((ep->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK) == LIBUSB_TRANSFER_TYPE_INTERRUPT) {
             if (ep->bEndpointAddress & LIBUSB_ENDPOINT_IN) {
                 ctx->in_endpoint = ep->bEndpointAddress;
             } else {
@@ -164,7 +168,6 @@ int usb_open_device(UsbContext *ctx) {
 
     LOG_DEBUG("Found endpoints: IN=0x%02x, OUT=0x%02x", ctx->in_endpoint, ctx->out_endpoint);
     ctx->connected = true;
-    ctx->reconnect_attempts = 0;
 
     return 0;
 }
@@ -184,148 +187,43 @@ void usb_close_device(UsbContext *ctx) {
 /*******************************************************************************
  * USB Communication
  ******************************************************************************/
-int usb_send_ack(UsbContext *ctx, uint8_t sequence, bool verbose) {
-    uint8_t ack_packet[] = {
-        GIP_CMD_ACKNOWLEDGE, 0x20, sequence, 0x09,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };
-
-    int transferred;
-    int result = libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint, ack_packet,
-                                            sizeof(ack_packet), &transferred, USB_ACK_TIMEOUT_MS);
-
-    if (result == 0 && verbose) {
-        LOG_DEBUG("Sent ACK (seq=%d)", sequence);
-    }
-    return result == 0 && transferred == (int)sizeof(ack_packet) ? 0 : -1;
-}
-
-int usb_ack_guide_button(UsbContext *ctx, uint8_t sequence) {
-    uint8_t packet[] = {
-        GIP_CMD_ACKNOWLEDGE, 0x20, sequence, 0x09,
-        0x00, GIP_CMD_GUIDE_BUTTON, 0x20, 0x02,
-        0x00, 0x00, 0x00, 0x00, 0x00
-    };
-    return usb_write_packet(ctx, packet, sizeof(packet));
-}
-
-int usb_initialize_controller(UsbContext *ctx, bool verbose) {
-    uint8_t buffer[USB_BUFFER_SIZE];
-    int transferred;
-    int result;
-
-    if (verbose) {
-        LOG_INFO("Initializing Controller - Performing GIP handshake...");
-    }
-
-    for (int attempt = 0; attempt < 5; attempt++) {
-        result = libusb_interrupt_transfer(ctx->handle, ctx->in_endpoint, buffer,
-                                            sizeof(buffer), &transferred, USB_INIT_TIMEOUT_MS);
-
-        if (result == 0 && transferred >= (int)sizeof(GipHeader)) {
-            GipHeader *header = (GipHeader *)buffer;
-
-            if (verbose) {
-                LOG_DEBUG("Received: %s (0x%02x), seq=%d",
-                          gip_command_name(header->command), header->command, header->sequence);
-            }
-
-            if (header->command == GIP_CMD_ANNOUNCE) {
-                usb_send_ack(ctx, header->sequence, verbose);
-            }
-        } else if (result == LIBUSB_ERROR_TIMEOUT) {
-            break;
-        }
-    }
-
-    if (verbose) {
-        LOG_INFO("Initialization complete! Sending GIP init sequence...");
-    }
-
-    /*
-     * GIP init sequence, mirroring the Linux xpad driver. PDP pads (0x0e6f)
-     * need power_on -> led_on -> auth_done to start sending input reports;
-     * sending only power_on leaves the LED dark and the pad silent.
-     * Byte [2] of each packet is an incrementing sequence number
-     * (xpad: odata[2] = odata_serial++).
-     */
-    uint8_t power_on[]   = {GIP_CMD_POWER, 0x20, 0x00, 0x01, 0x00};
-    uint8_t led_on[]     = {GIP_CMD_LED, 0x20, 0x00, 0x03, 0x00, 0x01, 0x14};
-    uint8_t auth_done[]  = {GIP_CMD_AUTHENTICATE, 0x20, 0x00, 0x02, 0x01, 0x00};
-
-    struct { uint8_t *pkt; int len; const char *name; } init_seq[] = {
-        {power_on,  (int)sizeof(power_on),  "POWER ON"},
-        {led_on,    (int)sizeof(led_on),    "LED ON"},
-        {auth_done, (int)sizeof(auth_done), "AUTH DONE"},
-    };
-
-    for (size_t i = 0; i < sizeof(init_seq) / sizeof(init_seq[0]); i++) {
-        init_seq[i].pkt[2] = ctx->sequence++;
-        result = libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint,
-                                            init_seq[i].pkt, init_seq[i].len,
-                                            &transferred, USB_ACK_TIMEOUT_MS);
-        if (result != 0) {
-            LOG_ERROR("Failed to send %s init packet: %s", init_seq[i].name,
-                      libusb_error_name(result));
-            return -1;
-        }
-        if (verbose) {
-            LOG_INFO("Sent %s (seq=%d)", init_seq[i].name, init_seq[i].pkt[2]);
-        }
-        usleep(50000);
-    }
-
-    usleep(500000);
-    return 0;
-}
-
-int usb_read_packet(UsbContext *ctx, uint8_t *buffer, int size, int *transferred, int timeout_ms) {
-    return libusb_interrupt_transfer(ctx->handle, ctx->in_endpoint, buffer,
-                                      size, transferred, timeout_ms);
-}
-
-int usb_write_packet(UsbContext *ctx, uint8_t *buffer, int size) {
-    int transferred;
+static int usb_write_packet(UsbContext *ctx, uint8_t *buffer, int size, int timeout_ms) {
+    int transferred = 0;
     int result = libusb_interrupt_transfer(ctx->handle, ctx->out_endpoint, buffer,
-                                            size, &transferred, USB_OUTPUT_TIMEOUT_MS);
-    return result == 0 && transferred == size ? 0 : (result == 0 ? LIBUSB_ERROR_IO : result);
+                                            size, &transferred, timeout_ms);
+    if (result != 0) return result;
+    return transferred == size ? 0 : LIBUSB_ERROR_IO;
 }
 
-/*******************************************************************************
- * Rumble/Haptic Feedback
- ******************************************************************************/
-int usb_rumble_pulse(UsbContext *ctx, uint8_t intensity, uint16_t duration_ms) {
-    GipRumblePacket pkt = {
-        .header = {
-            .command = GIP_CMD_RUMBLE,
-            .options = 0x00,
-            .sequence = ctx->sequence++,
-            .length = sizeof(GipRumblePacket) - sizeof(GipHeader)
-        },
-        .reserved = 0,
-        .enable = 0x03,  // Enable both motors
-        .magnitude_trigger_left = 0,
-        .magnitude_trigger_right = 0,
-        .magnitude_left = intensity,
-        .magnitude_right = intensity,
-        .duration = (uint8_t)(duration_ms / 10),
-        .delay = 0,
-        .repeat = 0
-    };
+/* Acknowledgement payloads are GIP_ACK_PAYLOAD bytes: the first two name the
+   message being acknowledged, the rest are zero. */
+#define GIP_ACK_PAYLOAD 9
 
-    int result = usb_write_packet(ctx, (uint8_t*)&pkt, sizeof(pkt));
-    if (result == 0) {
-        LOG_DEBUG("Rumble pulse sent: intensity=%d, duration=%dms", intensity, duration_ms);
-    } else {
-        LOG_WARN("Failed to send rumble pulse");
+static int usb_send_ack(UsbContext *ctx, uint8_t sequence, bool verbose) {
+    uint8_t ack_packet[sizeof(GipHeader) + GIP_ACK_PAYLOAD] = {
+        GIP_CMD_ACKNOWLEDGE, GIP_OPT_INTERNAL, sequence, GIP_ACK_PAYLOAD,
+    };
+    int result = usb_write_packet(ctx, ack_packet, sizeof(ack_packet), USB_ACK_TIMEOUT_MS);
+    if (result != 0) {
+        LOG_WARN("Failed to acknowledge announce (seq=%d): %s", sequence,
+                 libusb_error_name(result));
+    } else if (verbose) {
+        LOG_DEBUG("Sent ACK (seq=%d)", sequence);
     }
     return result;
 }
 
-/*******************************************************************************
- * Helpers
- ******************************************************************************/
-const char* gip_command_name(uint8_t command) {
+/* The guide button report asks for an acknowledgement; without one the
+   controller keeps resending it. Same packet as Linux xpad's mode-report ack. */
+int usb_ack_guide_button(UsbContext *ctx, uint8_t sequence) {
+    uint8_t packet[sizeof(GipHeader) + GIP_ACK_PAYLOAD] = {
+        GIP_CMD_ACKNOWLEDGE, GIP_OPT_INTERNAL, sequence, GIP_ACK_PAYLOAD,
+        0x00, GIP_CMD_GUIDE_BUTTON, GIP_OPT_INTERNAL, 0x02,
+    };
+    return usb_write_packet(ctx, packet, sizeof(packet), USB_OUTPUT_TIMEOUT_MS);
+}
+
+static const char* gip_command_name(uint8_t command) {
     switch (command) {
         case GIP_CMD_ACKNOWLEDGE: return "Acknowledge";
         case GIP_CMD_ANNOUNCE: return "Announce";
@@ -342,6 +240,126 @@ const char* gip_command_name(uint8_t command) {
     }
 }
 
+#define INIT_PACKET_GAP_US 50000    // Between init packets
+#define INIT_SETTLE_US     500000   // Before the first input read
+
+int usb_initialize_controller(UsbContext *ctx, bool verbose) {
+    uint8_t buffer[USB_BUFFER_SIZE];
+    int transferred;
+    int result;
+
+    if (verbose) {
+        LOG_INFO("Initializing Controller - Performing GIP handshake...");
+    }
+
+    // Acknowledge the controller's announce packets until it goes quiet
+    for (int attempt = 0; attempt < USB_INIT_READ_ATTEMPTS; attempt++) {
+        transferred = 0;
+        result = libusb_interrupt_transfer(ctx->handle, ctx->in_endpoint, buffer,
+                                            sizeof(buffer), &transferred, USB_INIT_TIMEOUT_MS);
+
+        if (result == 0 && transferred >= (int)sizeof(GipHeader)) {
+            const GipHeader *header = (const GipHeader *)buffer;
+
+            if (verbose) {
+                LOG_DEBUG("Received: %s (0x%02x), seq=%d",
+                          gip_command_name(header->command), header->command, header->sequence);
+            }
+
+            if (header->command == GIP_CMD_ANNOUNCE) {
+                usb_send_ack(ctx, header->sequence, verbose);
+            }
+        } else if (result == LIBUSB_ERROR_NO_DEVICE) {
+            LOG_ERROR("Controller disappeared during the handshake");
+            return -1;
+        } else if (result == LIBUSB_ERROR_TIMEOUT) {
+            break;
+        }
+    }
+
+    if (verbose) {
+        LOG_INFO("Initialization complete! Sending GIP init sequence...");
+    }
+
+    /*
+     * GIP init sequence, mirroring the Linux xpad driver. PDP pads (0x0e6f)
+     * need power_on -> led_on -> auth_done to start sending input reports;
+     * sending only power_on leaves the LED dark and the pad silent.
+     * Byte [2] of each packet is an incrementing sequence number
+     * (xpad: odata[2] = odata_serial++).
+     */
+    uint8_t power_on[]   = {GIP_CMD_POWER, GIP_OPT_INTERNAL, 0x00, 0x01, 0x00};
+    uint8_t led_on[]     = {GIP_CMD_LED, GIP_OPT_INTERNAL, 0x00, 0x03, 0x00, 0x01, 0x14};
+    uint8_t auth_done[]  = {GIP_CMD_AUTHENTICATE, GIP_OPT_INTERNAL, 0x00, 0x02, 0x01, 0x00};
+
+    struct { uint8_t *pkt; int len; const char *name; } init_seq[] = {
+        {power_on,  (int)sizeof(power_on),  "POWER ON"},
+        {led_on,    (int)sizeof(led_on),    "LED ON"},
+        {auth_done, (int)sizeof(auth_done), "AUTH DONE"},
+    };
+
+    for (size_t i = 0; i < sizeof(init_seq) / sizeof(init_seq[0]); i++) {
+        init_seq[i].pkt[2] = ctx->sequence++;
+        result = usb_write_packet(ctx, init_seq[i].pkt, init_seq[i].len, USB_ACK_TIMEOUT_MS);
+        if (result != 0) {
+            LOG_ERROR("Failed to send %s init packet: %s", init_seq[i].name,
+                      libusb_error_name(result));
+            return -1;
+        }
+        if (verbose) {
+            LOG_INFO("Sent %s (seq=%d)", init_seq[i].name, init_seq[i].pkt[2]);
+        }
+        usleep(INIT_PACKET_GAP_US);
+    }
+
+    usleep(INIT_SETTLE_US);
+    return 0;
+}
+
+int usb_read_packet(UsbContext *ctx, uint8_t *buffer, int size, int *transferred, int timeout_ms) {
+    *transferred = 0;
+    return libusb_interrupt_transfer(ctx->handle, ctx->in_endpoint, buffer,
+                                      size, transferred, timeout_ms);
+}
+
+/*******************************************************************************
+ * Rumble/Haptic Feedback
+ ******************************************************************************/
+#define RUMBLE_MAIN_MOTORS   0x03   // Left + right main motors, not the triggers
+#define RUMBLE_DURATION_UNIT 10     // Duration field is in 10 ms steps
+
+int usb_rumble_pulse(UsbContext *ctx, uint8_t intensity, uint16_t duration_ms) {
+    unsigned units = duration_ms / RUMBLE_DURATION_UNIT;
+    GipRumblePacket pkt = {
+        .header = {
+            .command = GIP_CMD_RUMBLE,
+            .options = 0x00,
+            .sequence = ctx->sequence++,   // wraps at 255, as the protocol expects
+            .length = sizeof(GipRumblePacket) - sizeof(GipHeader)
+        },
+        .reserved = 0,
+        .enable = RUMBLE_MAIN_MOTORS,
+        .magnitude_trigger_left = 0,
+        .magnitude_trigger_right = 0,
+        .magnitude_left = intensity,
+        .magnitude_right = intensity,
+        .duration = (uint8_t)(units > UINT8_MAX ? UINT8_MAX : units),
+        .delay = 0,
+        .repeat = 0
+    };
+
+    int result = usb_write_packet(ctx, (uint8_t*)&pkt, sizeof(pkt), USB_OUTPUT_TIMEOUT_MS);
+    if (result == 0) {
+        LOG_DEBUG("Rumble pulse sent: intensity=%d, duration=%dms", intensity, duration_ms);
+    } else {
+        LOG_WARN("Failed to send rumble pulse: %s", libusb_error_name(result));
+    }
+    return result;
+}
+
+/*******************************************************************************
+ * Helpers
+ ******************************************************************************/
 void print_buttons(uint16_t buttons) {
     if (buttons & XBOX_BTN_A) printf("A ");
     if (buttons & XBOX_BTN_B) printf("B ");

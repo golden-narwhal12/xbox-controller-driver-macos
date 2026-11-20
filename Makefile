@@ -3,8 +3,9 @@
 
 CC = gcc
 OBJCC = clang
-CFLAGS = -Wall -Wextra -O2 -I./include
-OBJCFLAGS = -Wall -Wextra -O2 -I./include -fobjc-arc
+WARNINGS = -Wall -Wextra -Wshadow -Wstrict-prototypes -Wmissing-prototypes -Wundef
+CFLAGS = $(WARNINGS) -O2 -I./include
+OBJCFLAGS = -Wall -Wextra -Wshadow -O2 -I./include -fobjc-arc
 DEPFLAGS = -MMD -MP
 LIBUSB_CFLAGS = $(shell pkg-config --cflags libusb-1.0)
 LIBUSB_LIBS = $(shell pkg-config --libs libusb-1.0)
@@ -17,6 +18,10 @@ SRC_LOG = src/log.c
 SRC_CONFIG = src/config/config.c
 SRC_EVENT = src/event/event.c
 SRC_INPUT = src/input/input.c
+SRC_CURSOR = src/input/cursor.c
+SRC_TICK = src/input/tick.c
+SRC_WINDOW = src/platform/window.c
+SRC_CLOCK = src/platform/clock.c
 SRC_USB = src/usb/usb.c
 SRC_DRIVER = src/core/driver.c
 SRC_MAIN_CLI = src/main.c
@@ -28,17 +33,25 @@ OBJ_LOG = build/log.o
 OBJ_CONFIG = build/config.o
 OBJ_EVENT = build/event.o
 OBJ_INPUT = build/input.o
+OBJ_CURSOR = build/cursor.o
+OBJ_TICK = build/tick.o
+OBJ_WINDOW = build/window.o
+OBJ_CLOCK = build/clock.o
 OBJ_USB = build/usb.o
 OBJ_DRIVER = build/driver.o
 OBJ_MAIN_CLI = build/main_cli.o
 OBJ_MAIN_GUI = build/main_gui.o
 OBJ_MENUBAR = build/menubar.o
 
+# Objects shared by both drivers
+OBJS_CORE = $(OBJ_LOG) $(OBJ_CONFIG) $(OBJ_EVENT) $(OBJ_INPUT) $(OBJ_CURSOR) $(OBJ_TICK) \
+            $(OBJ_WINDOW) $(OBJ_CLOCK) $(OBJ_USB) $(OBJ_DRIVER)
+
 # All objects for CLI driver
-OBJS_CLI = $(OBJ_LOG) $(OBJ_CONFIG) $(OBJ_EVENT) $(OBJ_INPUT) $(OBJ_USB) $(OBJ_DRIVER) $(OBJ_MAIN_CLI)
+OBJS_CLI = $(OBJS_CORE) $(OBJ_MAIN_CLI)
 
 # All objects for GUI driver (default)
-OBJS_GUI = $(OBJ_LOG) $(OBJ_CONFIG) $(OBJ_EVENT) $(OBJ_INPUT) $(OBJ_USB) $(OBJ_DRIVER) $(OBJ_MAIN_GUI) $(OBJ_MENUBAR)
+OBJS_GUI = $(OBJS_CORE) $(OBJ_MAIN_GUI) $(OBJ_MENUBAR)
 
 # Targets - GUI is the default
 all: simulator simulator-cli
@@ -58,6 +71,18 @@ $(OBJ_EVENT): $(SRC_EVENT) | build
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(OBJ_INPUT): $(SRC_INPUT) | build
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(OBJ_CURSOR): $(SRC_CURSOR) | build
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(OBJ_TICK): $(SRC_TICK) | build
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(OBJ_WINDOW): $(SRC_WINDOW) | build
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(OBJ_CLOCK): $(SRC_CLOCK) | build
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(OBJ_USB): $(SRC_USB) | build
@@ -97,45 +122,53 @@ simulator-cli: $(OBJS_CLI)
 	@echo ""
 	@echo "This is the CLI-only version (no menu bar)."
 
-# Legacy targets (for compatibility) - all sources in legacy/
-xbox_usb_test: legacy/phase2_usb_test.c
-	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) $< $(LIBUSB_LIBS) -o $@
-
-xbox_gip_test: legacy/phase3_gip_test.c legacy/gip.h
-	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -I./legacy $< $(LIBUSB_LIBS) -o $@
-
-simulator-legacy: legacy/simulator.c legacy/gip.h legacy/keymapping.h
-	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -I./legacy $< $(LIBUSB_LIBS) $(FRAMEWORK_FLAGS) -o $@ -lm
-	@echo ""
-	@echo "Built legacy simulator successfully!"
-	@echo "   This is the original single-file version."
-
 # Test targets
-test: test-input test-input-runtime test-config test-lut
+#
+# Every suite links the real sources (TEST_SRCS). The only code replaced is the
+# OS itself: tests/fake_platform.h implements include/platform.h.
+TEST_SRCS = $(SRC_INPUT) $(SRC_CURSOR) $(SRC_TICK) $(SRC_CONFIG) $(SRC_LOG)
+TEST_SUITES = test_input test_input_runtime test_cursor test_tick test_config test_lut test_driver
+TEST_BINS = $(TEST_SUITES:%=build/%)
+
+build/test_%: tests/test_%.c $(TEST_SRCS) $(wildcard include/*.h) $(wildcard tests/*.h) | build
+	$(CC) $(CFLAGS) $(TEST_FLAGS) $< $(TEST_SRCS) -o $@ -lm
+
+# The driver suite also links the real driver.c, against a scripted USB layer
+# (so no libusb at link time, only its header).
+build/test_driver: tests/test_driver.c $(TEST_SRCS) $(SRC_DRIVER) $(wildcard include/*.h) $(wildcard tests/*.h) | build
+	$(CC) $(CFLAGS) $(TEST_FLAGS) $(LIBUSB_CFLAGS) $< $(TEST_SRCS) $(SRC_DRIVER) -o $@ -lm -lpthread
+
+test: $(TEST_BINS)
+	@for suite in $(TEST_SUITES); do ./build/$$suite || exit 1; done
 	@echo ""
 	@echo "All tests completed!"
 
-test-input: tests/test_input.c src/input/input.c src/log.c include/types.h include/input.h | build
-	$(CC) $(CFLAGS) tests/test_input.c src/input/input.c src/log.c -o build/test_input -lm
-	@echo ""
-	@echo "Running input tests..."
-	@./build/test_input
+# One suite at a time: make test-input, make test-cursor, ...
+test-%: build/test_%
+	@./$<
 
-test-input-runtime: tests/test_input_runtime.c src/input/input.c src/config/config.c src/log.c | build
-	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) tests/test_input_runtime.c src/input/input.c src/config/config.c src/log.c -o build/test_input_runtime -lm
-	@./build/test_input_runtime
+test-input-runtime: build/test_input_runtime
+	@./$<
 
-test-config: tests/test_config.c src/config/config.c include/types.h include/config.h src/log.c | build
-	$(CC) $(CFLAGS) tests/test_config.c src/config/config.c src/log.c -o build/test_config -lm
-	@echo ""
-	@echo "Running config tests..."
-	@./build/test_config
+# The same suites under AddressSanitizer + UndefinedBehaviorSanitizer
+test-asan:
+	$(MAKE) -B test TEST_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
 
-test-lut: tests/test_lut.c src/input/input.c src/log.c include/input.h | build
-	$(CC) $(CFLAGS) tests/test_lut.c src/input/input.c src/log.c -o build/test_lut -lm
-	@echo ""
-	@echo "Running LUT tests..."
-	@./build/test_lut
+# The driver thread suite under ThreadSanitizer: reports any data race between
+# the packet thread and the motion thread
+test-tsan:
+	$(MAKE) -B build/test_driver TEST_FLAGS="-fsanitize=thread -g"
+	@./build/test_driver
+	@$(MAKE) -B build/test_driver >/dev/null
+
+# Opt-in integration test: opens a real window, moves and resizes it, and
+# checks the window tracker reports matching frames. Not part of `make test`
+# because it needs a GUI session (and Accessibility permission to exercise the
+# Accessibility path; without it the window-list fallback is tested).
+test-window: tests/integration_window.m $(SRC_WINDOW) $(SRC_LOG) | build
+	$(OBJCC) $(OBJCFLAGS) tests/integration_window.m $(SRC_WINDOW) $(SRC_LOG) \
+		$(FRAMEWORK_FLAGS) $(COCOA_FLAGS) -lpthread -o build/integration_window
+	@./build/integration_window
 
 # Release package (zip of binaries + default config), for GitHub Releases
 ARCH = $(shell uname -m)
@@ -152,7 +185,7 @@ dist: simulator simulator-cli
 # Clean
 clean:
 	rm -rf build dist
-	rm -f xbox_usb_test xbox_gip_test simulator simulator-cli simulator-legacy
+	rm -f simulator simulator-cli
 	@echo "Cleaned up build artifacts"
 
 # Install dependencies (homebrew)
@@ -176,13 +209,14 @@ help:
 	@echo "  make all            - Build all programs"
 	@echo "  make simulator      - Build the simulator with menu bar GUI (default)"
 	@echo "  make simulator-cli  - Build the CLI-only simulator (no menu bar)"
-	@echo "  make simulator-legacy - Build the original single-file version"
 	@echo ""
 	@echo "Test Targets:"
 	@echo "  make test           - Run all unit tests"
-	@echo "  make test-input     - Run input processing tests"
-	@echo "  make test-config    - Run configuration tests"
-	@echo "  make test-lut       - Run lookup table tests"
+	@echo "  make test-<suite>   - Run one suite: input, input-runtime, cursor,"
+	@echo "                        tick, config, lut, driver"
+	@echo "  make test-asan      - Run all unit tests under ASan + UBSan"
+	@echo "  make test-tsan      - Run the driver thread tests under ThreadSanitizer"
+	@echo "  make test-window    - Integration test of window tracking (needs a GUI session)"
 	@echo ""
 	@echo "Usage:"
 	@echo "  sudo ./simulator          - Run with menu bar GUI"
@@ -202,6 +236,6 @@ help:
 	@echo ""
 	@echo "Note: Requires accessibility permissions for keyboard/mouse input"
 
-.PHONY: all dist clean deps help test test-input test-input-runtime test-config test-lut install-config
+.PHONY: all dist clean deps help test test-asan test-tsan test-window install-config
 
 -include $(wildcard build/*.d)

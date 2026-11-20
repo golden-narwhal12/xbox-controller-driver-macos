@@ -1,21 +1,31 @@
 /*******************************************************************************
- * event.c - Event injection implementation (keyboard/mouse)
+ * event.c - Event posting and cursor queries (CoreGraphics side of platform.h)
+ *
+ * Posts exactly what it is told. Where the cursor may go and where clicks land
+ * is decided in src/input/cursor.c.
+ *
+ * All functions here are called with the driver's output mutex held, so the
+ * modifier state below is never touched by two threads at once.
  ******************************************************************************/
 
-// ApplicationServices includes CoreGraphics and handles include ordering properly
 #include <ApplicationServices/ApplicationServices.h>
 
-// Include our headers after system headers
-#include "../../include/event.h"
+#include "../../include/platform.h"
 #include "../../include/log.h"
-#include <math.h>
 #include <string.h>
 
-static float g_delta_remainder_x = 0.0f;
-static float g_delta_remainder_y = 0.0f;
+/* macOS virtual keycodes of the modifier keys */
+#define VK_COMMAND        0x37
+#define VK_SHIFT          0x38
+#define VK_OPTION         0x3A
+#define VK_CONTROL        0x3B
+#define VK_RIGHT_COMMAND  0x36
+#define VK_RIGHT_SHIFT    0x3C
+#define VK_RIGHT_OPTION   0x3D
+#define VK_RIGHT_CONTROL  0x3E
+
 static CGEventSourceRef g_source = NULL;
-static bool g_modifier_down[256];
-static CGEventFlags g_synthetic_flags = 0;
+static bool g_modifier_down[KEY_COUNT];   // Modifiers this driver is holding
 
 static CGEventSourceRef event_source(void) {
     if (!g_source) g_source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
@@ -24,175 +34,145 @@ static CGEventSourceRef event_source(void) {
 
 static CGEventFlags modifier_flag(uint16_t keycode) {
     switch (keycode) {
-        case 0x38: case 0x3C: return kCGEventFlagMaskShift;
-        case 0x3B: case 0x3E: return kCGEventFlagMaskControl;
-        case 0x3A: case 0x3D: return kCGEventFlagMaskAlternate;
-        case 0x37: case 0x36: return kCGEventFlagMaskCommand;
+        case VK_SHIFT:   case VK_RIGHT_SHIFT:   return kCGEventFlagMaskShift;
+        case VK_CONTROL: case VK_RIGHT_CONTROL: return kCGEventFlagMaskControl;
+        case VK_OPTION:  case VK_RIGHT_OPTION:  return kCGEventFlagMaskAlternate;
+        case VK_COMMAND: case VK_RIGHT_COMMAND: return kCGEventFlagMaskCommand;
         default: return 0;
     }
 }
 
+/* Flags for a new event: modifiers physically held on the real keyboard plus
+   the ones this driver is holding (which the HID state does not include). */
 static CGEventFlags current_flags(void) {
-    return CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) | g_synthetic_flags;
-}
-
-static void update_modifier_flags(void) {
-    g_synthetic_flags = 0;
-    if (g_modifier_down[0x38] || g_modifier_down[0x3C]) g_synthetic_flags |= kCGEventFlagMaskShift;
-    if (g_modifier_down[0x3B] || g_modifier_down[0x3E]) g_synthetic_flags |= kCGEventFlagMaskControl;
-    if (g_modifier_down[0x3A] || g_modifier_down[0x3D]) g_synthetic_flags |= kCGEventFlagMaskAlternate;
-    if (g_modifier_down[0x37] || g_modifier_down[0x36]) g_synthetic_flags |= kCGEventFlagMaskCommand;
-}
-
-void send_key_event(uint16_t keycode, bool pressed) {
-    CGEventRef event = CGEventCreateKeyboardEvent(event_source(), (CGKeyCode)keycode, pressed);
-    if (event) {
-        if (modifier_flag(keycode)) {
-            g_modifier_down[keycode] = pressed;
-            update_modifier_flags();
-            CGEventSetType(event, kCGEventFlagsChanged);
-        }
-        CGEventSetFlags(event, current_flags());
-        CGEventPost(kCGHIDEventTap, event);
-        CFRelease(event);
-        LOG_DEBUG("Key event: keycode=0x%02x pressed=%d", keycode, pressed);
-    } else {
-        LOG_ERROR("Failed to create keyboard event for keycode 0x%02x", keycode);
+    static const uint16_t MODIFIERS[] = {
+        VK_SHIFT, VK_RIGHT_SHIFT, VK_CONTROL, VK_RIGHT_CONTROL,
+        VK_OPTION, VK_RIGHT_OPTION, VK_COMMAND, VK_RIGHT_COMMAND,
+    };
+    CGEventFlags flags = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState);
+    for (size_t i = 0; i < sizeof(MODIFIERS) / sizeof(MODIFIERS[0]); i++) {
+        if (g_modifier_down[MODIFIERS[i]]) flags |= modifier_flag(MODIFIERS[i]);
     }
+    return flags;
 }
 
-void send_mouse_button_event(int button, bool pressed) {
-    CGPoint currentPos;
-    CGEventRef getPos = CGEventCreate(NULL);
-    if (!getPos) {
-        LOG_ERROR("Failed to read mouse position");
+static void post(CGEventRef event) {
+    CGEventSetFlags(event, current_flags());
+    CGEventPost(kCGHIDEventTap, event);
+    CFRelease(event);
+}
+
+void platform_post_key(uint16_t keycode, bool pressed) {
+    if (keycode >= KEY_COUNT) return;
+    CGEventRef event = CGEventCreateKeyboardEvent(event_source(), (CGKeyCode)keycode, pressed);
+    if (!event) {
+        LOG_ERROR("Failed to create keyboard event for keycode 0x%02x", keycode);
         return;
     }
-    currentPos = CGEventGetLocation(getPos);
-    CFRelease(getPos);
+    if (modifier_flag(keycode)) {
+        // Modifiers are reported as flag changes, not key down/up
+        g_modifier_down[keycode] = pressed;
+        CGEventSetType(event, kCGEventFlagsChanged);
+    }
+    post(event);
+}
 
-    CGEventType eventType;
-    CGMouseButton cgButton = (CGMouseButton)button;
-
+void platform_post_mouse_button(int button, bool pressed, ScreenPoint position, int click_count) {
+    CGEventType type;
     switch (button) {
-        case 0:  // MOUSE_BUTTON_LEFT / kCGMouseButtonLeft
-            eventType = pressed ? kCGEventLeftMouseDown : kCGEventLeftMouseUp;
+        case MOUSE_BUTTON_LEFT:
+            type = pressed ? kCGEventLeftMouseDown : kCGEventLeftMouseUp;
             break;
-        case 1:  // MOUSE_BUTTON_RIGHT / kCGMouseButtonRight
-            eventType = pressed ? kCGEventRightMouseDown : kCGEventRightMouseUp;
+        case MOUSE_BUTTON_RIGHT:
+            type = pressed ? kCGEventRightMouseDown : kCGEventRightMouseUp;
             break;
-        case 2:  // MOUSE_BUTTON_CENTER / kCGMouseButtonCenter
-            eventType = pressed ? kCGEventOtherMouseDown : kCGEventOtherMouseUp;
+        case MOUSE_BUTTON_CENTER:
+            type = pressed ? kCGEventOtherMouseDown : kCGEventOtherMouseUp;
             break;
         default:
             LOG_WARN("Unknown mouse button: %d", button);
             return;
     }
 
-    CGEventRef event = CGEventCreateMouseEvent(event_source(), eventType, currentPos, cgButton);
-    if (event) {
-        CGEventSetFlags(event, current_flags());
-        CGEventPost(kCGHIDEventTap, event);
-        CFRelease(event);
-        LOG_DEBUG("Mouse button event: button=%d pressed=%d", button, pressed);
-    } else {
+    CGEventRef event = CGEventCreateMouseEvent(event_source(), type,
+                                               CGPointMake(position.x, position.y),
+                                               (CGMouseButton)button);
+    if (!event) {
         LOG_ERROR("Failed to create mouse button event");
-    }
-}
-
-static bool on_a_display(CGPoint p) {
-    uint32_t count = 0;
-    return CGGetDisplaysWithPoint(p, 0, NULL, &count) == kCGErrorSuccess && count > 0;
-}
-
-static CGPoint clamp_to_displays(CGPoint pos, float dx, float dy) {
-    CGPoint both = CGPointMake(pos.x + dx, pos.y + dy);
-    if (on_a_display(both)) return both;
-    CGPoint x_only = CGPointMake(pos.x + dx, pos.y);
-    if (on_a_display(x_only)) return x_only;
-    CGPoint y_only = CGPointMake(pos.x, pos.y + dy);
-    if (on_a_display(y_only)) return y_only;
-    return pos;
-}
-
-void send_scroll_event(int lines) {
-    // Line units behave like scroll-wheel notches (one hotbar slot in games,
-    // a few lines in documents). Positive scrolls content up.
-    CGEventRef event = CGEventCreateScrollWheelEvent(event_source(), kCGScrollEventUnitLine,
-                                                     1, (int32_t)lines);
-    if (event) {
-        CGEventSetFlags(event, current_flags());
-        CGEventPost(kCGHIDEventTap, event);
-        CFRelease(event);
-        LOG_DEBUG("Scroll event: lines=%d", lines);
-    } else {
-        LOG_ERROR("Failed to create scroll event");
-    }
-}
-
-void send_mouse_movement(float dx, float dy, bool streaming_mode,
-                         bool left_down, bool right_down, bool middle_down) {
-    if (dx == 0.0f && dy == 0.0f) {
         return;
     }
+    // Without a click count, a quick second click is not seen as a double-click
+    CGEventSetIntegerValueField(event, kCGMouseEventClickState, click_count);
+    post(event);
+}
 
-    CGPoint currentPos;
-    CGEventRef getPos = CGEventCreate(NULL);
-    if (!getPos) {
-        LOG_ERROR("Failed to read mouse position");
-        return;
-    }
-    currentPos = CGEventGetLocation(getPos);
-    CFRelease(getPos);
-
+void platform_post_mouse_move(ScreenPoint position, int delta_x, int delta_y, int drag_button) {
     CGEventType type = kCGEventMouseMoved;
     CGMouseButton button = kCGMouseButtonLeft;
-    if (left_down) {
+    if (drag_button == MOUSE_BUTTON_LEFT) {
         type = kCGEventLeftMouseDragged;
-    } else if (right_down) {
+    } else if (drag_button == MOUSE_BUTTON_RIGHT) {
         type = kCGEventRightMouseDragged;
         button = kCGMouseButtonRight;
-    } else if (middle_down) {
+    } else if (drag_button == MOUSE_BUTTON_CENTER) {
         type = kCGEventOtherMouseDragged;
         button = kCGMouseButtonCenter;
     }
 
-    g_delta_remainder_x += dx;
-    g_delta_remainder_y += dy;
-    int64_t delta_x = (int64_t)lroundf(g_delta_remainder_x);
-    int64_t delta_y = (int64_t)lroundf(g_delta_remainder_y);
-    g_delta_remainder_x -= delta_x;
-    g_delta_remainder_y -= delta_y;
-
-    CGEventRef event;
-
-    if (streaming_mode) {
-        // Streaming mode: Use delta fields (for Moonlight, Parsec, etc.)
-        event = CGEventCreateMouseEvent(event_source(), type, currentPos, button);
-    } else {
-        // Local mode: move the cursor (for desktop apps). At a screen edge the
-        // cursor cannot follow, so keep whichever axis still fits and let the
-        // delta fields below carry the rest; apps that capture the mouse
-        // (games looking around) keep turning instead of stalling at the edge.
-        CGPoint newPos = clamp_to_displays(currentPos, dx, dy);
-        event = CGEventCreateMouseEvent(event_source(), type, newPos, button);
+    CGEventRef event = CGEventCreateMouseEvent(event_source(), type,
+                                               CGPointMake(position.x, position.y), button);
+    if (!event) {
+        LOG_ERROR("Failed to create mouse move event");
+        return;
     }
-
-    if (event) {
-        CGEventSetFlags(event, current_flags());
-        CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, delta_x);
-        CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, delta_y);
-        CGEventPost(kCGHIDEventTap, event);
-        CFRelease(event);
-    }
+    CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, delta_x);
+    CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, delta_y);
+    post(event);
 }
 
-void event_cleanup(void) {
+void platform_post_scroll(int lines) {
+    // Line units behave like wheel notches (one hotbar slot in games, a few
+    // lines in documents). Positive is wheel up. Posted events are not
+    // re-inverted by the "natural scrolling" setting, which applies to
+    // physical devices only.
+    CGEventRef event = CGEventCreateScrollWheelEvent(event_source(), kCGScrollEventUnitLine,
+                                                     1, (int32_t)lines);
+    if (!event) {
+        LOG_ERROR("Failed to create scroll event");
+        return;
+    }
+    post(event);
+}
+
+ScreenPoint platform_cursor_position(void) {
+    CGPoint location = CGPointZero;
+    CGEventRef event = CGEventCreate(NULL);
+    if (event) {
+        location = CGEventGetLocation(event);
+        CFRelease(event);
+    } else {
+        LOG_ERROR("Failed to read mouse position");
+    }
+    return (ScreenPoint){location.x, location.y};
+}
+
+void platform_warp_cursor(ScreenPoint position) {
+    // Deliberately no CGAssociateMouseAndMouseCursorPosition(true) here: that
+    // setting is global, and a game that has captured the mouse relies on it
+    // staying off.
+    CGWarpMouseCursorPosition(CGPointMake(position.x, position.y));
+}
+
+bool platform_point_on_display(ScreenPoint position) {
+    uint32_t count = 0;
+    return CGGetDisplaysWithPoint(CGPointMake(position.x, position.y), 0, NULL, &count)
+               == kCGErrorSuccess && count > 0;
+}
+
+void platform_events_cleanup(void) {
     if (g_source) {
         CFRelease(g_source);
         g_source = NULL;
     }
     memset(g_modifier_down, 0, sizeof(g_modifier_down));
-    g_synthetic_flags = 0;
-    g_delta_remainder_x = g_delta_remainder_y = 0.0f;
 }
