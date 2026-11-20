@@ -41,12 +41,13 @@ void menubar_set_connected(bool connected);
 /**
  * Run the menu bar application event loop
  * Must be called from the main thread
- * This function blocks until the application quits
+ * Blocks until the user chooses Quit or menubar_quit() is called, then
+ * returns so the caller can clean up
  */
 void menubar_run(void);
 
 /**
- * Request the menu bar application to quit
+ * Make menubar_run() return
  * Can be called from any thread
  */
 void menubar_quit(void);

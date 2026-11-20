@@ -8,11 +8,6 @@ build/
 # Compiled binaries
 simulator
 simulator-cli
-simulator-legacy
-xbox_usb_test
-xbox_gip_test
-phase3_debug
-test_iohid
 
 # macOS
 .DS_Store

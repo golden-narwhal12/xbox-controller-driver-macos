@@ -7,7 +7,7 @@
 #include <time.h>
 #include <string.h>
 
-static LogLevel g_log_level = LOG_LEVEL_INFO;
+static _Atomic LogLevel g_log_level = LOG_LEVEL_INFO;   // read by every thread
 static FILE *g_log_file = NULL;
 
 static const char *level_names[] = {
@@ -55,15 +55,16 @@ LogLevel log_get_level(void) {
 }
 
 void log_message(LogLevel level, const char *file, int line, const char *fmt, ...) {
-    if (level < g_log_level) {
+    if (level < g_log_level || level >= LOG_LEVEL_NONE) {
         return;
     }
 
     // Get timestamp
     time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);   // localtime() is not safe across threads
     char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm_info);
 
     // Extract filename from path
     const char *filename = strrchr(file, '/');

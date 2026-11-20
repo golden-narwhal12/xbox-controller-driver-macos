@@ -9,14 +9,28 @@
     "ls": "left_shift",
     "rs": "left_control",
     "view": "tab",
-    "menu": "escape"
+    "menu": "escape",
+    "dpad_up": "up",
+    "dpad_down": "down",
+    "dpad_left": "left",
+    "dpad_right": "right"
   },
   "left_stick": {
     "mode": "wasd",
-    "deadzone": 8000
+    "deadzone": 8000,
+    "up": "w",
+    "down": "s",
+    "left": "a",
+    "right": "d",
+    "threshold": 0.30,
+    "hysteresis": 0.05,
+    "pwm_period_ms": 100,
+    "pwm_full_on": 0.90,
+    "pwm_min_pulse_ms": 20
   },
   "right_stick": {
     "mode": "mouse",
+    "deadzone": 8000,
     "sensitivity": 1.5,
     "curve": 1.8,
     "smoothing": 0.3
@@ -24,17 +38,24 @@
   "triggers": {
     "left": "mouse_right",
     "right": "mouse_left",
-    "threshold": 127
+    "threshold": 127,
+    "hysteresis": 26
   },
   "features": {
     "rumble": {
       "enabled": true,
-      "button_feedback": true
+      "button_feedback": true,
+      "intensity": 100,
+      "duration_ms": 50
     }
   },
   "advanced": {
     "log_level": "info",
+    "console_output": true,
     "streaming_mode": false,
-    "console_output": true
+    "confine_cursor": "window",
+    "confine_margin": 12,
+    "confine_top_inset": 28,
+    "recenter_when_captured": false
   }
 }

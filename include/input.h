@@ -1,5 +1,9 @@
 /*******************************************************************************
- * input.h - Input processing declarations
+ * input.h - Controller input to key/mouse intent (pure logic, no OS calls)
+ *
+ * Everything here is deterministic: raw report bytes and elapsed time go in,
+ * OutEvents come out on a queue. Posting those events is the caller's job
+ * (cursor_dispatch), which is what lets tests run the real code.
  ******************************************************************************/
 
 #ifndef INPUT_H
@@ -9,72 +13,60 @@
 #include "gip_protocol.h"
 
 /*******************************************************************************
- * Packet Processing
- *
- * Decodes one GIP input packet into this layer's conventions (stick +Y is
- * converted from GIP's "up" to screen "down") and runs buttons, triggers and
- * sticks through the translation pipeline.
+ * Output queue
  ******************************************************************************/
-void process_input_packet(const GipInputPacket *packet, InputState *state,
-                          const ControllerMapping *config,
-                          void (*rumble_callback)(void *ctx), void *rumble_ctx);
+void out_queue_init(OutQueue *queue);
 
 /*******************************************************************************
- * Response Curve
- *
- * |norm|^curve from a 257-entry lookup table over [0, 1] (truncating, no
- * interpolation). Inputs beyond 1 return the table's last entry.
- ******************************************************************************/
-float curve_lookup(float norm, float curve);
-
-/*******************************************************************************
- * Deadzone Processing
- ******************************************************************************/
-void apply_deadzone(int16_t *x, int16_t *y, int16_t deadzone);
-
-/*******************************************************************************
- * Button Processing
- ******************************************************************************/
-void process_buttons(uint16_t buttons, InputState *state, const ControllerMapping *config,
-                     void (*rumble_callback)(void *ctx), void *rumble_ctx);
-
-/*******************************************************************************
- * Trigger Processing
- ******************************************************************************/
-void process_triggers(uint16_t left_trigger, uint16_t right_trigger,
-                      InputState *state, const ControllerMapping *config);
-
-/*******************************************************************************
- * Stick Processing
- ******************************************************************************/
-void process_stick_as_keys(int16_t x, int16_t y,
-                           uint16_t key_up, uint16_t key_down,
-                           uint16_t key_left, uint16_t key_right,
-                           InputState *state, int source_base);
-
-void process_stick_as_mouse(int16_t x, int16_t y,
-                            float *smoothed_x, float *smoothed_y,
-                            float *mouse_dx, float *mouse_dy,
-                            const ControllerMapping *config, float dt_scale);
-
-void process_sticks(int16_t left_x, int16_t left_y,
-                    int16_t right_x, int16_t right_y,
-                    InputState *state, const ControllerMapping *config,
-                    bool streaming_mode);
-
-/*******************************************************************************
- * Continuous Movement
- *
- * Called on a timer. dt_ms is the measured time since the previous call;
- * motion and smoothing are scaled by it (clamped to MOTION_MAX_DT_MS).
- ******************************************************************************/
-void generate_continuous_movement(InputState *state, const ControllerMapping *config,
-                                  bool streaming_mode, float dt_ms);
-
-/*******************************************************************************
- * State Management
+ * State
  ******************************************************************************/
 void input_state_init(InputState *state);
-void input_state_release_all(InputState *state);
+
+/* Queue a release for every held key and mouse button, then reset the state.
+   Used on unplug, config reload and shutdown. */
+void input_state_release_all(InputState *state, OutQueue *out);
+
+/*******************************************************************************
+ * Report decoding
+ *
+ * Decodes a raw GIP input report (little-endian on the wire). Returns false
+ * when the buffer is not an input report or is too short.
+ ******************************************************************************/
+bool gip_parse_input(const uint8_t *data, size_t length, GipInput *out);
+
+/*******************************************************************************
+ * Report processing
+ *
+ * Runs buttons, triggers and sticks through the translation pipeline.
+ * Returns the number of buttons newly pressed by this report (for rumble).
+ ******************************************************************************/
+int process_input(const GipInput *input, InputState *state,
+                  const ControllerMapping *config, OutQueue *out);
+
+/*******************************************************************************
+ * Motion tick
+ *
+ * Called on the motion clock. dt_ms is the measured time since the previous
+ * call (clamped to MOTION_MAX_DT_MS). Drives stick-to-mouse motion, held
+ * scroll repeat and stick PWM, none of which depend on report arrival.
+ ******************************************************************************/
+void motion_tick(InputState *state, const ControllerMapping *config,
+                 float dt_ms, OutQueue *out);
+
+/*******************************************************************************
+ * Building blocks (exposed for tests)
+ ******************************************************************************/
+
+/* Scaled radial deadzone: 0 inside the deadzone, then magnitude rises linearly
+   from 0 at the edge to 1 at full tilt, keeping the stick's direction. */
+Vec2 stick_deadzone(int16_t x, int16_t y, int16_t deadzone);
+
+/* Stretches the unit circle onto the unit square so a full diagonal reads as
+   (1, 1) rather than (0.71, 0.71). Used when a stick drives two keys. */
+Vec2 stick_to_square(Vec2 v);
+
+/* |norm|^curve from a 257-entry table over [0, 1], linearly interpolated.
+   Inputs beyond 1 return the table's last entry. */
+float curve_lookup(float norm, float curve);
 
 #endif // INPUT_H

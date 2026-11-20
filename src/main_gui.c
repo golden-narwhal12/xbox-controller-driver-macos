@@ -8,18 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
-#include <unistd.h>
-#include <time.h>
-#include <stdatomic.h>
 
 /*******************************************************************************
  * Global State
  ******************************************************************************/
 static DriverContext g_ctx;
 static pthread_t g_driver_thread;
-static pthread_t g_status_thread;
-static atomic_bool g_driver_running;
-static int g_driver_result;
+static int g_driver_result;    // Written by the driver thread, read after join
 
 /*******************************************************************************
  * Callbacks
@@ -36,58 +31,35 @@ static void on_quit(void *context) {
     driver_request_stop();
 }
 
+/* Called on the driver thread; the menu bar functions hop to the main thread. */
+static void on_driver_status(DriverStatus status) {
+    switch (status) {
+        case DRIVER_STATUS_CONNECTED:
+            menubar_set_status("Connected");
+            menubar_set_connected(true);
+            break;
+        case DRIVER_STATUS_DISCONNECTED:
+            menubar_set_status("Disconnected - reconnecting...");
+            menubar_set_connected(false);
+            break;
+        case DRIVER_STATUS_FAILED:
+            menubar_set_status("Error - check console");
+            menubar_set_connected(false);
+            break;
+    }
+}
+
 /*******************************************************************************
  * Driver Thread
  ******************************************************************************/
 static void *driver_thread_func(void *arg) {
     (void)arg;
+    g_driver_result = driver_run(&g_ctx);
 
-    // Run the driver
-    int result = driver_run(&g_ctx);
-    g_driver_result = result;
-
-    if (result != 0) {
-        menubar_set_status("Error - Check console");
-    }
-
-    atomic_store(&g_driver_running, false);
-
-    // Request quit if driver exits
+    // The driver is done (error, signal or quit): end the menu bar loop so
+    // main() can clean up.
     menubar_quit();
-
     return NULL;
-}
-
-static int start_driver_thread(void) {
-    atomic_store(&g_driver_running, true);
-    int result = pthread_create(&g_driver_thread, NULL, driver_thread_func, NULL);
-    if (result != 0) atomic_store(&g_driver_running, false);
-    return result;
-}
-
-/*******************************************************************************
- * Status Update Thread
- ******************************************************************************/
-static void *status_thread_func(void *arg) {
-    (void)arg;
-
-    while (atomic_load(&g_driver_running)) {
-        if (g_ctx.usb.connected) {
-            menubar_set_status("Connected");
-            menubar_set_connected(true);
-        } else {
-            menubar_set_status("Disconnected");
-            menubar_set_connected(false);
-        }
-
-        usleep(500000);  // Update every 500ms
-    }
-
-    return NULL;
-}
-
-static int start_status_thread(void) {
-    return pthread_create(&g_status_thread, NULL, status_thread_func, NULL);
 }
 
 /*******************************************************************************
@@ -127,28 +99,22 @@ int main(int argc, char *argv[]) {
     // Initialize menu bar
     menubar_init(&g_ctx, on_reload_config, on_quit);
     menubar_set_status("Initializing...");
+    driver_set_status_callback(&g_ctx, on_driver_status);
 
     // Start driver in background thread
-    atomic_init(&g_driver_running, false);
-    if (start_driver_thread() != 0) {
+    if (pthread_create(&g_driver_thread, NULL, driver_thread_func, NULL) != 0) {
         fprintf(stderr, "Failed to start driver thread\n");
         driver_cleanup(&g_ctx);
         return 1;
     }
 
-    // Start status update thread
-    bool status_started = start_status_thread() == 0;
-
-    // Run menu bar event loop (blocks until quit)
-    // This must be on the main thread for macOS
+    // Run the menu bar event loop on the main thread (required by AppKit).
+    // Returns when the user quits or the driver thread ends.
     menubar_run();
 
-    // Wait for driver thread to finish
+    // Stop the driver, then release held keys and close the device
     driver_request_stop();
     pthread_join(g_driver_thread, NULL);
-    if (status_started) pthread_join(g_status_thread, NULL);
-
-    // Cleanup
     driver_cleanup(&g_ctx);
 
     return g_driver_result;

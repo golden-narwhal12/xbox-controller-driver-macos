@@ -1,339 +1,414 @@
+/*******************************************************************************
+ * test_input_runtime.c - End to end: raw report bytes in, posted events out
+ ******************************************************************************/
+
 #include "test_framework.h"
-#include <math.h>
-#include "../include/config.h"
-#include "../include/input.h"
-#include "../include/event.h"
+#include "fake_platform.h"
 
-/* Packet layout is checked at compile time by _Static_asserts in gip_protocol.h. */
-
-static int key_down[256], key_up[256];
-static int mouse_down[3], mouse_up[3], moves;
-static bool last_move_left, last_move_right;
-static float last_dx, last_dy;
-static int scroll_up_count, scroll_down_count;
-
-void send_scroll_event(int lines) {
-    if (lines > 0) scroll_up_count += lines;
-    else scroll_down_count -= lines;
-}
-
-void send_key_event(uint16_t code, bool pressed) {
-    if (code < 256) (pressed ? key_down : key_up)[code]++;
-}
-
-void send_mouse_button_event(int button, bool pressed) {
-    (pressed ? mouse_down : mouse_up)[button]++;
-}
-
-void send_mouse_movement(float dx, float dy, bool streaming_mode,
-                         bool left_down, bool right_down, bool middle_down) {
-    (void)streaming_mode; (void)middle_down;
-    moves++;
-    last_dx = dx;
-    last_dy = dy;
-    last_move_left = left_down;
-    last_move_right = right_down;
-}
-
-static GipInputPacket make_packet(void) {
-    GipInputPacket packet;
-    memset(&packet, 0, sizeof(packet));
-    packet.header.command = GIP_CMD_INPUT;
-    return packet;
-}
-
-static void setup(InputState *state, ControllerMapping *mapping) {
-    memset(key_down, 0, sizeof(key_down));
-    memset(key_up, 0, sizeof(key_up));
-    memset(mouse_down, 0, sizeof(mouse_down));
-    memset(mouse_up, 0, sizeof(mouse_up));
-    moves = 0;
-    last_dx = last_dy = 0.0f;
-    scroll_up_count = scroll_down_count = 0;
-    last_move_left = last_move_right = false;
-    input_state_init(state);
-    config_get_defaults(mapping);
-    mapping->features.rumble.enabled = false;
-}
-
-TEST(trigger_holds_across_pressure_bytes) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-
-    /* A slow squeeze of RT through its 10-bit range is one held click. */
-    process_triggers(0, 512, &state, &mapping);
-    process_triggers(0, 768, &state, &mapping);
-    process_triggers(0, 1023, &state, &mapping);
-    ASSERT_EQ(mouse_down[MOUSE_BUTTON_LEFT], 1);
-    ASSERT_EQ(mouse_up[MOUSE_BUTTON_LEFT], 0);
-    ASSERT_TRUE(state.mouse_left);
-
-    process_triggers(0, 0, &state, &mapping);
-    ASSERT_EQ(mouse_up[MOUSE_BUTTON_LEFT], 1);
-    ASSERT_FALSE(state.mouse_left);
-    TEST_PASS();
-}
-
-TEST(overlapping_key_sources) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-    mapping.buttons.key_a = mapping.sticks.left_up;
-
-    process_buttons(XBOX_BTN_A, &state, &mapping, NULL, NULL);
-    process_sticks(0, -30000, 0, 0, &state, &mapping, false);
-    ASSERT_EQ(key_down[mapping.buttons.key_a], 1);
-
-    process_buttons(0, &state, &mapping, NULL, NULL);
-    ASSERT_EQ(key_up[mapping.buttons.key_a], 0);
-    process_sticks(0, 0, 0, 0, &state, &mapping, false);
-    ASSERT_EQ(key_up[mapping.buttons.key_a], 1);
-    TEST_PASS();
-}
-
-TEST(button_mouse_binding_and_release_all) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-    mapping.buttons.key_a = BINDING_MOUSE_LEFT;
-
-    process_buttons(XBOX_BTN_A, &state, &mapping, NULL, NULL);
-    process_triggers(0, 1023, &state, &mapping);
-    ASSERT_EQ(mouse_down[MOUSE_BUTTON_LEFT], 1);
-    process_buttons(0, &state, &mapping, NULL, NULL);
-    ASSERT_EQ(mouse_up[MOUSE_BUTTON_LEFT], 0);
-    input_state_release_all(&state);
-    ASSERT_EQ(mouse_up[MOUSE_BUTTON_LEFT], 1);
-    ASSERT_FALSE(state.mouse_left);
-    TEST_PASS();
-}
-
-TEST(continuous_look_and_drag) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-
-    process_triggers(0, 1023, &state, &mapping);
-    process_sticks(0, 0, 28000, 0, &state, &mapping, true);
-    ASSERT_EQ(moves, 0);
-    generate_continuous_movement(&state, &mapping, true, MOTION_TICK_MS);
-    generate_continuous_movement(&state, &mapping, true, MOTION_TICK_MS);
-    ASSERT_EQ(moves, 2);
-    ASSERT_TRUE(last_move_left);
-    ASSERT_FALSE(last_move_right);
-
-    process_triggers(0, 0, &state, &mapping);
-    generate_continuous_movement(&state, &mapping, true, MOTION_TICK_MS);
-    ASSERT_FALSE(last_move_left);
-    TEST_PASS();
-}
-
-TEST(right_stick_uses_right_mapping) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-    mapping.sticks.right_stick_mode = STICK_MODE_WASD;
-
-    process_sticks(0, 0, 0, -30000, &state, &mapping, false);
-    ASSERT_EQ(key_down[mapping.sticks.right_up], 1);
-    ASSERT_EQ(key_down[mapping.sticks.left_up], 0);
-    process_sticks(0, 0, 0, 0, &state, &mapping, false);
-    ASSERT_EQ(key_up[mapping.sticks.right_up], 1);
-    TEST_PASS();
-}
-
-static int rumbles;
-static void count_rumble(void *ctx) { (void)ctx; rumbles++; }
-
-/* Rumble fires once per press: not while held, not on release. */
-TEST(button_rumble_once_per_press) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-    mapping.features.rumble.enabled = true;
-    mapping.features.rumble.button_feedback = true;
-    rumbles = 0;
-
-    process_buttons(XBOX_BTN_A, &state, &mapping, count_rumble, NULL);
-    process_buttons(XBOX_BTN_A, &state, &mapping, count_rumble, NULL);
-    ASSERT_EQ(rumbles, 1);
-    process_buttons(XBOX_BTN_A | XBOX_BTN_B, &state, &mapping, count_rumble, NULL);
-    ASSERT_EQ(rumbles, 2);
-    process_buttons(0, &state, &mapping, count_rumble, NULL);
-    ASSERT_EQ(rumbles, 2);
-    TEST_PASS();
-}
+#define FULL 30000   // A firmly pushed stick
 
 /* GIP reports stick +Y as up: pushing the left stick forward must press W. */
 TEST(packet_left_stick_up_presses_w) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-
-    GipInputPacket packet = make_packet();
-    packet.left_stick_y = 30000;
-    process_input_packet(&packet, &state, &mapping, NULL, NULL);
-    ASSERT_EQ(key_down[mapping.sticks.left_up], 1);
-    ASSERT_EQ(key_down[mapping.sticks.left_down], 0);
+    Rig rig;
+    rig_init(&rig);
+    rig_report(&rig, 0, 0, 0, 0, FULL, 0, 0);
+    ASSERT_EQ(fake.key_down[KEY_W], 1);
+    ASSERT_EQ(fake.key_down[KEY_S], 0);
     TEST_PASS();
 }
 
 /* Pushing the right stick up must move the mouse up (negative screen dy). */
 TEST(packet_right_stick_up_moves_mouse_up) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-
-    GipInputPacket packet = make_packet();
-    packet.right_stick_y = 30000;
-    process_input_packet(&packet, &state, &mapping, NULL, NULL);
-    generate_continuous_movement(&state, &mapping, false, MOTION_TICK_MS);
-    ASSERT_EQ(moves, 1);
-    ASSERT(last_dy < 0.0f);
-    ASSERT_FLOAT_EQ(last_dx, 0.0f, 0.001f);
+    Rig rig;
+    rig_init(&rig);
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, FULL);
+    rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.moves, 1);
+    ASSERT(rig.move_dy < 0.0f);
+    ASSERT_FLOAT_EQ(rig.move_dx, 0.0f, 0.001f);
+    ASSERT(fake_last(FAKE_MOVE)->dy < 0);
+    ASSERT(fake.cursor.y < 500);
     TEST_PASS();
 }
 
 /* Fully down (-32768) must not overflow into "up" when Y is inverted. */
 TEST(packet_extreme_y_does_not_overflow) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
+    Rig rig;
+    rig_init(&rig);
+    rig_report(&rig, 0, 0, 0, 0, -32768, 0, 0);
+    ASSERT_EQ(fake.key_down[KEY_S], 1);
+    ASSERT_EQ(fake.key_down[KEY_W], 0);
 
-    GipInputPacket packet = make_packet();
-    packet.left_stick_y = -32768;
-    process_input_packet(&packet, &state, &mapping, NULL, NULL);
-    ASSERT_EQ(key_down[mapping.sticks.left_down], 1);
-    ASSERT_EQ(key_down[mapping.sticks.left_up], 0);
+    rig_init(&rig);
+    rig_report(&rig, 0, 0, 0, -32768, 32767, 0, 0);
+    ASSERT_EQ(fake.key_down[KEY_A], 1);
+    ASSERT_EQ(fake.key_down[KEY_W], 1);
+    ASSERT_EQ(fake.key_down[KEY_D], 0);
     TEST_PASS();
 }
 
-/* Default mapping: RT (bytes 8-9) is the primary/left click, LT the right click. */
+/* Default mapping: RT is the primary/left click, LT the right click. */
 TEST(right_trigger_is_primary_click) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
+    Rig rig;
+    rig_init(&rig);
+    rig_report(&rig, 0, 0, 1023, 0, 0, 0, 0);
+    ASSERT_EQ(fake.mouse_down[MOUSE_BUTTON_LEFT], 1);
+    ASSERT_EQ(fake.mouse_down[MOUSE_BUTTON_RIGHT], 0);
 
-    GipInputPacket packet = make_packet();
-    packet.right_trigger = 1023;
-    process_input_packet(&packet, &state, &mapping, NULL, NULL);
-    ASSERT_EQ(mouse_down[MOUSE_BUTTON_LEFT], 1);
-    ASSERT_EQ(mouse_down[MOUSE_BUTTON_RIGHT], 0);
+    rig_report(&rig, 0, 1023, 0, 0, 0, 0, 0);
+    ASSERT_EQ(fake.mouse_up[MOUSE_BUTTON_LEFT], 1);
+    ASSERT_EQ(fake.mouse_down[MOUSE_BUTTON_RIGHT], 1);
+    TEST_PASS();
+}
 
-    packet = make_packet();
-    packet.left_trigger = 1023;
-    process_input_packet(&packet, &state, &mapping, NULL, NULL);
-    ASSERT_EQ(mouse_up[MOUSE_BUTTON_LEFT], 1);
-    ASSERT_EQ(mouse_down[MOUSE_BUTTON_RIGHT], 1);
+/* A slow squeeze of RT through its 10-bit range is one held click. */
+TEST(trigger_holds_across_pressure_values) {
+    Rig rig;
+    rig_init(&rig);
+    for (int pressure = 0; pressure <= 1023; pressure += 31) {
+        rig_report(&rig, 0, 0, pressure, 0, 0, 0, 0);
+    }
+    ASSERT_EQ(fake.mouse_down[MOUSE_BUTTON_LEFT], 1);
+    ASSERT_EQ(fake.mouse_up[MOUSE_BUTTON_LEFT], 0);
+
+    for (int pressure = 1023; pressure >= 0; pressure -= 31) {
+        rig_report(&rig, 0, 0, pressure, 0, 0, 0, 0);
+    }
+    ASSERT_EQ(fake.mouse_down[MOUSE_BUTTON_LEFT], 1);
+    ASSERT_EQ(fake.mouse_up[MOUSE_BUTTON_LEFT], 1);
     TEST_PASS();
 }
 
 /* One 20 ms tick moves as far as two 10 ms ticks; stalls are clamped. */
 TEST(motion_scales_with_elapsed_time) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-    mapping.sticks.mouse_smoothing = 0.0f;  // isolate the gain from the filter
+    Rig rig;
+    rig_init(&rig);
+    rig.config.mouse.smoothing = 0.0f;  // isolate the gain from the filter
 
-    process_sticks(0, 0, 20000, 0, &state, &mapping, false);
-    generate_continuous_movement(&state, &mapping, false, 20.0f);
-    float one_long_tick = last_dx;
+    rig_report(&rig, 0, 0, 0, 0, 0, 20000, 0);
+    rig_tick(&rig, 20.0f);
+    float one_long_tick = rig.move_dx;
 
-    generate_continuous_movement(&state, &mapping, false, 10.0f);
-    float two_short_ticks = last_dx;
-    generate_continuous_movement(&state, &mapping, false, 10.0f);
-    two_short_ticks += last_dx;
+    rig_tick(&rig, 10.0f);
+    float two_short_ticks = rig.move_dx;
+    rig_tick(&rig, 10.0f);
+    two_short_ticks += rig.move_dx;
 
     ASSERT(one_long_tick > 0.0f);
     ASSERT_FLOAT_EQ(one_long_tick, two_short_ticks, 0.001f);
 
-    generate_continuous_movement(&state, &mapping, false, 1000.0f);
-    float stalled = last_dx;
-    generate_continuous_movement(&state, &mapping, false, MOTION_MAX_DT_MS);
-    ASSERT_FLOAT_EQ(stalled, last_dx, 0.001f);
+    rig_tick(&rig, 1000.0f);
+    float stalled = rig.move_dx;
+    rig_tick(&rig, MOTION_MAX_DT_MS);
+    ASSERT_FLOAT_EQ(stalled, rig.move_dx, 0.001f);
+
+    // Zero, negative and NaN elapsed times do nothing
+    fake_clear_log();
+    rig_tick(&rig, 0.0f);
+    rig_tick(&rig, -5.0f);
+    rig_tick(&rig, NAN);
+    ASSERT_EQ(fake.moves, 0);
+    TEST_PASS();
+}
+
+/* Full tilt speed is sensitivity * MOUSE_PX_PER_TICK per tick: the deadzone
+   rescale must not change top speed. */
+TEST(full_tilt_speed_unchanged) {
+    Rig rig;
+    rig_init(&rig);
+    rig.config.mouse.smoothing = 0.0f;
+    rig_report(&rig, 0, 0, 0, 0, 0, 32767, 0);
+    rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_FLOAT_EQ(rig.move_dx, DEFAULT_SENSITIVITY * MOUSE_PX_PER_TICK, 0.01f);
     TEST_PASS();
 }
 
 /* A full diagonal turns as fast as full straight-right (curve is radial). */
 TEST(diagonal_speed_matches_cardinal) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
-    mapping.sticks.mouse_smoothing = 0.0f;  // isolate the curve from the filter
+    Rig rig;
+    rig_init(&rig);
+    rig.config.mouse.smoothing = 0.0f;  // isolate the curve from the filter
 
-    process_sticks(0, 0, 28000, 0, &state, &mapping, false);
-    generate_continuous_movement(&state, &mapping, false, MOTION_TICK_MS);
-    float straight = sqrtf(last_dx * last_dx + last_dy * last_dy);
+    rig_report(&rig, 0, 0, 0, 0, 0, 28000, 0);
+    rig_tick(&rig, MOTION_TICK_MS);
+    float straight = sqrtf(rig.move_dx * rig.move_dx + rig.move_dy * rig.move_dy);
 
-    process_sticks(0, 0, 19799, 19799, &state, &mapping, false);  // same distance, 45 degrees
-    generate_continuous_movement(&state, &mapping, false, MOTION_TICK_MS);
-    float diagonal = sqrtf(last_dx * last_dx + last_dy * last_dy);
+    rig_report(&rig, 0, 0, 0, 0, 0, 19799, -19799);  // same distance, 45 degrees down-right
+    rig_tick(&rig, MOTION_TICK_MS);
+    float diagonal = sqrtf(rig.move_dx * rig.move_dx + rig.move_dy * rig.move_dy);
 
     ASSERT(straight > 0.0f);
     ASSERT_FLOAT_EQ(diagonal, straight, 0.01f * straight);
-    ASSERT_FLOAT_EQ(last_dx, last_dy, 0.001f);
+    ASSERT_FLOAT_EQ(rig.move_dx, rig.move_dy, 0.001f);
     TEST_PASS();
 }
 
 /* The smoothing filter settles the same amount per unit time, whatever the tick length. */
 TEST(smoothing_is_time_consistent) {
-    InputState one_tick, two_ticks;
-    ControllerMapping mapping;
-    setup(&one_tick, &mapping);
-    input_state_init(&two_ticks);
+    Rig one_tick, two_ticks;
+    rig_init(&one_tick);
+    rig_report(&one_tick, 0, 0, 0, 0, 0, 20000, 0);
+    rig_tick(&one_tick, 20.0f);
 
-    process_sticks(0, 0, 20000, 0, &one_tick, &mapping, false);
-    process_sticks(0, 0, 20000, 0, &two_ticks, &mapping, false);
-    generate_continuous_movement(&one_tick, &mapping, false, 20.0f);
-    generate_continuous_movement(&two_ticks, &mapping, false, 10.0f);
-    generate_continuous_movement(&two_ticks, &mapping, false, 10.0f);
-    ASSERT_FLOAT_EQ(one_tick.smoothed_right_x, two_ticks.smoothed_right_x, 0.0001f);
+    rig_init(&two_ticks);
+    rig_report(&two_ticks, 0, 0, 0, 0, 0, 20000, 0);
+    rig_tick(&two_ticks, 10.0f);
+    rig_tick(&two_ticks, 10.0f);
+    ASSERT(one_tick.state.smoothed[STICK_RIGHT].x > 0.0f);
+    ASSERT_FLOAT_EQ(one_tick.state.smoothed[STICK_RIGHT].x,
+                    two_ticks.state.smoothed[STICK_RIGHT].x, 0.0001f);
+    TEST_PASS();
+}
+
+/* After the stick is released the smoothing tail ends: no events forever after. */
+TEST(released_stick_stops_posting_motion) {
+    Rig rig;
+    rig_init(&rig);
+    rig_report(&rig, 0, 0, 0, 0, 0, 32767, 0);
+    for (int i = 0; i < 50; i++) rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT(fake.moves > 40);
+
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, 0);
+    for (int i = 0; i < 100; i++) rig_tick(&rig, MOTION_TICK_MS);   // let the filter settle
+    fake_clear_log();
+    for (int i = 0; i < 1000; i++) rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.log_count, 0);
+    TEST_PASS();
+}
+
+/* Slow motion is delivered in whole points without losing the fractions. */
+TEST(slow_motion_accumulates_subpixels) {
+    Rig rig;
+    rig_init(&rig);
+    rig.config.mouse.smoothing = 0.0f;
+    rig_report(&rig, 0, 0, 0, 0, 0, 12000, 0);     // a slight tilt
+    float requested = 0.0f;
+    for (int i = 0; i < 400; i++) {
+        rig_tick(&rig, MOTION_TICK_MS);
+        requested += rig.move_dx;
+    }
+    ASSERT(rig.move_dx > 0.0f && rig.move_dx < 1.0f);   // under one point per tick
+    int delivered = 0;
+    for (int i = 0; i < fake.log_count; i++) {
+        ASSERT(fake.log[i].dx != 0);                    // never an empty move event
+        delivered += fake.log[i].dx;
+    }
+    ASSERT(fake.moves < 400);
+    ASSERT_FLOAT_EQ((float)delivered, requested, 1.0f);
+    ASSERT_FLOAT_EQ((float)(fake.cursor.x - 500), requested, 1.0f);
     TEST_PASS();
 }
 
 /* Default bumpers scroll: a tap is one notch, holding repeats, release stops. */
 TEST(bumpers_scroll_tap_and_hold) {
-    InputState state;
-    ControllerMapping mapping;
-    setup(&state, &mapping);
+    Rig rig;
+    rig_init(&rig);
 
-    process_buttons(XBOX_BTN_RB, &state, &mapping, NULL, NULL);
-    ASSERT_EQ(scroll_down_count, 1);
-    process_buttons(0, &state, &mapping, NULL, NULL);
-    generate_continuous_movement(&state, &mapping, false, 1000.0f);
-    ASSERT_EQ(scroll_down_count, 1);           /* released: no repeats */
+    rig_report(&rig, XBOX_BTN_RB, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(fake.scroll_down, 1);
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, 0);
+    for (int i = 0; i < 100; i++) rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.scroll_down, 1);           /* released: no repeats */
 
     /* Hold LB for 1 s in 10 ms ticks: 1 notch on press, repeats from 300 ms
        every 80 ms (300, 380, ..., 940) = 9 more */
-    process_buttons(XBOX_BTN_LB, &state, &mapping, NULL, NULL);
-    for (int i = 0; i < 100; i++)
-        generate_continuous_movement(&state, &mapping, false, MOTION_TICK_MS);
-    ASSERT_EQ(scroll_up_count, 10);
-    process_buttons(0, &state, &mapping, NULL, NULL);
-    for (int i = 0; i < 50; i++)
-        generate_continuous_movement(&state, &mapping, false, MOTION_TICK_MS);
-    ASSERT_EQ(scroll_up_count, 10);
-    ASSERT_EQ(scroll_down_count, 1);
+    rig_report(&rig, XBOX_BTN_LB, 0, 0, 0, 0, 0, 0);
+    for (int i = 0; i < 100; i++) rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.scroll_up, 10);
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, 0);
+    for (int i = 0; i < 50; i++) rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.scroll_up, 10);
+    ASSERT_EQ(fake.scroll_down, 1);
+
+    /* The repeat rate does not depend on tick length: 1 s in 13 ms ticks */
+    rig_init(&rig);
+    rig_report(&rig, XBOX_BTN_LB, 0, 0, 0, 0, 0, 0);
+    for (int i = 0; i < 77; i++) rig_tick(&rig, 13.0f);   // 1001 ms
+    ASSERT_EQ(fake.scroll_up, 10);
+    TEST_PASS();
+}
+
+/* Rumble is requested once per press: not while held, not on release. */
+TEST(button_press_edges_once_per_press) {
+    Rig rig;
+    rig_init(&rig);
+    rig_report(&rig, XBOX_BTN_A, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(rig.press_edges, 1);
+    rig_report(&rig, XBOX_BTN_A, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(rig.press_edges, 0);
+    rig_report(&rig, XBOX_BTN_A | XBOX_BTN_B | XBOX_BTN_X, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(rig.press_edges, 2);
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(rig.press_edges, 0);
+    // Triggers and sticks are not buttons
+    rig_report(&rig, 0, 1023, 1023, FULL, 0, 0, 0);
+    ASSERT_EQ(rig.press_edges, 0);
+    TEST_PASS();
+}
+
+/* Two sources on one key: the key stays down until both let go. */
+TEST(overlapping_key_sources) {
+    Rig rig;
+    rig_init(&rig);
+    rig.config.bindings[SOURCE_BTN_A] = KEY_W;
+
+    rig_report(&rig, XBOX_BTN_A, 0, 0, 0, 0, 0, 0);
+    rig_report(&rig, XBOX_BTN_A, 0, 0, 0, FULL, 0, 0);
+    ASSERT_EQ(fake.key_down[KEY_W], 1);
+
+    rig_report(&rig, 0, 0, 0, 0, FULL, 0, 0);
+    ASSERT_EQ(fake.key_up[KEY_W], 0);
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(fake.key_up[KEY_W], 1);
+    TEST_PASS();
+}
+
+TEST(button_mouse_binding_and_release_all) {
+    Rig rig;
+    rig_init(&rig);
+    rig.config.bindings[SOURCE_BTN_A] = BINDING_MOUSE_LEFT;
+
+    rig_report(&rig, XBOX_BTN_A, 0, 1023, 0, FULL, 0, 0);
+    ASSERT_EQ(fake.mouse_down[MOUSE_BUTTON_LEFT], 1);
+    rig_report(&rig, 0, 0, 1023, 0, FULL, 0, 0);
+    ASSERT_EQ(fake.mouse_up[MOUSE_BUTTON_LEFT], 0);
+
+    // Unplug / shutdown: every held key and button is released exactly once
+    rig_release_all(&rig);
+    ASSERT_EQ(fake.mouse_up[MOUSE_BUTTON_LEFT], 1);
+    ASSERT_EQ(fake.key_up[KEY_W], 1);
+    fake_clear_log();
+    rig_release_all(&rig);
+    for (int i = 0; i < 20; i++) rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.log_count, 0);
+    TEST_PASS();
+}
+
+/* Motion while a mouse button is held is a drag with that button. */
+TEST(continuous_look_and_drag) {
+    Rig rig;
+    rig_init(&rig);
+
+    rig_report(&rig, 0, 0, 1023, 0, 0, 28000, 0);
+    ASSERT_EQ(fake.moves, 0);                 // motion comes from the clock, not the report
+    rig_tick(&rig, MOTION_TICK_MS);
+    rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.moves, 2);
+    ASSERT_EQ(fake_last(FAKE_MOVE)->drag_button, MOUSE_BUTTON_LEFT);
+
+    rig_report(&rig, 0, 1023, 1023, 0, 0, 28000, 0);   // both: left wins
+    rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake_last(FAKE_MOVE)->drag_button, MOUSE_BUTTON_LEFT);
+
+    rig_report(&rig, 0, 1023, 0, 0, 0, 28000, 0);
+    rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake_last(FAKE_MOVE)->drag_button, MOUSE_BUTTON_RIGHT);
+
+    rig_report(&rig, 0, 0, 0, 0, 0, 28000, 0);
+    rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake_last(FAKE_MOVE)->drag_button, MOUSE_BUTTON_NONE);
+    TEST_PASS();
+}
+
+TEST(right_stick_uses_right_mapping) {
+    Rig rig;
+    rig_init(&rig);
+    rig.config.stick[STICK_RIGHT].mode = STICK_MODE_WASD;
+
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, FULL);
+    ASSERT_EQ(fake.key_down[KEY_I], 1);
+    ASSERT_EQ(fake.key_down[KEY_W], 0);
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(fake.key_up[KEY_I], 1);
+    rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.moves, 0);                 // not a mouse any more
+    TEST_PASS();
+}
+
+TEST(arrows_mode_and_left_stick_mouse) {
+    Rig rig;
+    rig_init(&rig);
+    rig.config.stick[STICK_LEFT].mode = STICK_MODE_ARROWS;
+    rig_report(&rig, 0, 0, 0, -FULL, 0, 0, 0);
+    ASSERT_EQ(fake.key_down[KEY_LEFT_ARROW], 1);
+    ASSERT_EQ(fake.key_down[KEY_A], 0);
+
+    rig_init(&rig);
+    rig.config.stick[STICK_LEFT].mode = STICK_MODE_MOUSE;
+    rig.config.stick[STICK_RIGHT].mode = STICK_MODE_DISABLED;
+    rig_report(&rig, 0, 0, 0, FULL, 0, FULL, 0);
+    rig_tick(&rig, MOTION_TICK_MS);
+    ASSERT_EQ(fake.moves, 1);
+    ASSERT(rig.move_dx > 0.0f);
+    ASSERT_EQ(fake_count(FAKE_KEY), 0);
+    TEST_PASS();
+}
+
+/* Config reload while things are held, as the driver does it: release under
+   the old bindings, then apply the new bindings to what is still held. */
+TEST(reload_while_held_releases_and_rebinds) {
+    Rig rig;
+    rig_init(&rig);
+    rig_report(&rig, XBOX_BTN_A, 0, 1023, 0, FULL, 0, 0);
+    ASSERT_EQ(fake.key_down[KEY_SPACE], 1);
+    ASSERT_EQ(fake.key_down[KEY_W], 1);
+    ASSERT_EQ(fake.mouse_down[MOUSE_BUTTON_LEFT], 1);
+
+    rig_release_all(&rig);
+    ASSERT_EQ(fake.key_up[KEY_SPACE], 1);
+    ASSERT_EQ(fake.key_up[KEY_W], 1);
+    ASSERT_EQ(fake.mouse_up[MOUSE_BUTTON_LEFT], 1);
+
+    rig.config.bindings[SOURCE_BTN_A] = KEY_F;
+    rig.config.stick[STICK_LEFT].mode = STICK_MODE_ARROWS;
+    rig.config.bindings[SOURCE_RIGHT_TRIGGER] = BINDING_NONE;
+    rig_report(&rig, XBOX_BTN_A, 0, 1023, 0, FULL, 0, 0);   // the same physical state
+    ASSERT_EQ(fake.key_down[KEY_F], 1);
+    ASSERT_EQ(fake.key_down[KEY_UP_ARROW], 1);
+    ASSERT_EQ(fake.key_down[KEY_SPACE], 1);                 // not pressed again
+    ASSERT_EQ(fake.mouse_down[MOUSE_BUTTON_LEFT], 1);
+
+    rig_report(&rig, 0, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(fake.key_up[KEY_F], 1);
+    ASSERT_EQ(fake.key_up[KEY_UP_ARROW], 1);
+    TEST_PASS();
+}
+
+/* Changing a binding in place (no release_all) still releases the old key. */
+TEST(binding_change_while_held_releases_old_key) {
+    Rig rig;
+    rig_init(&rig);
+    rig_report(&rig, XBOX_BTN_A, 0, 0, 0, 0, 0, 0);
+    rig.config.bindings[SOURCE_BTN_A] = KEY_F;
+    rig_report(&rig, XBOX_BTN_A, 0, 0, 0, 0, 0, 0);
+    ASSERT_EQ(fake.key_up[KEY_SPACE], 1);
+    ASSERT_EQ(fake.key_down[KEY_F], 1);
+    ASSERT_EQ(rig.press_edges, 0);            // not a new press: no rumble
     TEST_PASS();
 }
 
 int main(void) {
-    TEST_SUITE("Runtime Input");
+    TEST_SUITE("Runtime Input (end to end)");
     RUN_TEST(packet_left_stick_up_presses_w);
     RUN_TEST(packet_right_stick_up_moves_mouse_up);
     RUN_TEST(packet_extreme_y_does_not_overflow);
     RUN_TEST(right_trigger_is_primary_click);
+    RUN_TEST(trigger_holds_across_pressure_values);
     RUN_TEST(motion_scales_with_elapsed_time);
-    RUN_TEST(smoothing_is_time_consistent);
+    RUN_TEST(full_tilt_speed_unchanged);
     RUN_TEST(diagonal_speed_matches_cardinal);
+    RUN_TEST(smoothing_is_time_consistent);
+    RUN_TEST(released_stick_stops_posting_motion);
+    RUN_TEST(slow_motion_accumulates_subpixels);
     RUN_TEST(bumpers_scroll_tap_and_hold);
-    RUN_TEST(button_rumble_once_per_press);
-    RUN_TEST(trigger_holds_across_pressure_bytes);
+    RUN_TEST(button_press_edges_once_per_press);
     RUN_TEST(overlapping_key_sources);
     RUN_TEST(button_mouse_binding_and_release_all);
     RUN_TEST(continuous_look_and_drag);
     RUN_TEST(right_stick_uses_right_mapping);
+    RUN_TEST(arrows_mode_and_left_stick_mouse);
+    RUN_TEST(reload_while_held_releases_and_rebinds);
+    RUN_TEST(binding_change_while_held_releases_old_key);
     TEST_SUMMARY();
     return TEST_EXIT_CODE();
 }
